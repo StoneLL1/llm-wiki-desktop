@@ -54,8 +54,12 @@ impl WorkflowService {
             })
             .collect::<Vec<_>>();
         let default_route = settings
-            .agent_default
-            .map(|agent| WorkflowRouteSelection::Agent { agent })
+            .ai_default_route
+            .or_else(|| {
+                settings
+                    .agent_default
+                    .map(|agent| WorkflowRouteSelection::Agent { agent })
+            })
             .or_else(|| (providers.len() == 1).then(|| providers[0].clone()));
         let mut routes = AgentKind::ALL
             .into_iter()
@@ -361,6 +365,7 @@ fn configured_route(
         .collect::<Vec<_>>();
     let selection = selection
         .cloned()
+        .or(settings.ai_default_route)
         .or_else(|| {
             settings
                 .agent_default

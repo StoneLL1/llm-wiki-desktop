@@ -26,6 +26,17 @@ function ModalHarness() {
 afterEach(cleanup);
 
 describe("modal keyboard behavior", () => {
+  it("excludes retained hidden settings panes from the tab loop", () => {
+    function RetainedPaneModal() {
+      const ref = useModalDialog<HTMLDivElement>({ onClose: () => {} });
+      return <div ref={ref} role="dialog" aria-modal="true"><button>First</button><button>Last</button><section hidden><input aria-label="Retained provider draft" /></section></div>;
+    }
+    render(<RetainedPaneModal />);
+    screen.getByRole("button", { name: "Last" }).focus();
+    fireEvent.keyDown(document, { key: "Tab" });
+    expect(screen.getByRole("button", { name: "First" })).toHaveFocus();
+  });
+
   it("moves focus inside, closes on Escape, and restores the trigger", () => {
     render(<ModalHarness />);
     const trigger = screen.getByRole("button", { name: "Open export dialog" });

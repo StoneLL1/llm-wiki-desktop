@@ -413,6 +413,41 @@ of its hard bugs were ordering bugs.
   candidate cleanup**, or orphaned children keep writing into cleaned
   directories.
 
+## Compile citations and Update Wiki receipts
+
+`COMPILE_SOURCE_REF_INVALID` does not necessarily mean a file was deleted.
+A bare filename may name a nested Source or be ambiguous across directories.
+Resolve against the registered Source catalog and legacy adapter, preserve the
+actual project-relative path, and parse frontmatter as YAML before comparing
+citations. Do not repair this by moving originals or admitting arbitrary Wiki
+pages as Sources.
+
+- **Bind historical evidence before generating page bodies.** Selected inputs
+  determine consumption; historical originals are separate dependencies. A plan
+  may request evidence cited by its initial Wiki context, or retain the existing
+  target's citations. Adding one target must not authorize another target's
+  otherwise unavailable evidence. Persist the resolved version, paths and hash
+  of the bytes supplied to the model, then reuse that binding for validation,
+  review, recovery and apply. Local links in the `Sources` line must stay within
+  that page's structured citations.
+- **Build all metadata write sets from the same accepted outcomes.** Deferred
+  Sources remain pending. Already-covered decisions require reviewable evidence;
+  a decision-only plan need not rewrite Wiki pages. Checkpoints, receipts and
+  undo must agree on precisely which Source manifests are written.
+- **Distinguish explicit recompilation from duplicate submission.** A new full
+  recompile task may append consumption for an unchanged version; the same task
+  must never consume twice. Preserve earlier receipts and restore exact metadata
+  bytes on undo.
+- **Keep mixed registries isolated.** Unrelated broken legacy metadata must not
+  block a valid V2-only update, but requested legacy evidence must still validate.
+  V2-owned paths and modern identity fields must never fall back to legacy
+  interpretation when damaged.
+
+Regression coverage belongs in `compile_service`, `compile_legacy_adapter`,
+`source_registry` and `workflow_update_wiki`. Use disposable projects with
+nested/CJK paths, ambiguous aliases, changed historical evidence, mixed
+registries, deferred V2 inputs, full recompiles, review recovery and undo.
+
 ## Graph rendering
 
 - **Sigma emits `mousemovebody` before incrementing its drag

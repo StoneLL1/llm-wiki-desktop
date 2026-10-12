@@ -274,6 +274,12 @@ where
         .await;
         publication.started();
         let candidate = candidate?;
+        for dependency in &candidate.source_dependencies {
+            input_baseline.insert(
+                dependency.project_path.clone(),
+                Some(dependency.file_hash.clone()),
+            );
+        }
         let output_paths = candidate
             .manifest
             .files
@@ -1202,28 +1208,11 @@ fn apply_persisted_update_wiki_candidate(
     }
     let resolved_sources =
         CompileService::resolve_source_versions(context, &descriptor.source_versions)?;
-    CompileService::validate_selected_source_coverage_for_workflow(
-        &descriptor.candidate.plan,
-        &resolved_sources,
-    )?;
-    CompileService::validate_workflow_source_outcomes(
-        context,
-        &descriptor.candidate,
-        &resolved_sources,
-    )?;
-    let consumable = descriptor
-        .candidate
-        .source_outcomes
-        .iter()
-        .filter(|outcome| {
-            outcome.status != crate::models::compile::CompileSourceOutcomeStatus::Deferred
-        })
-        .map(|outcome| &outcome.source_version)
-        .collect::<Vec<_>>();
+    let consumable = descriptor.candidate.consumed_source_versions();
     if mode == UpdateWikiMode::ChangedSources
         && resolved_sources
             .iter()
-            .any(|source| source.already_consumed && consumable.contains(&&source.reference))
+            .any(|source| source.already_consumed && consumable.contains(&source.reference))
     {
         return Err(BackendError::new(
             "COMPILE_SOURCE_VERSION_STALE",
@@ -1232,16 +1221,11 @@ fn apply_persisted_update_wiki_candidate(
             true,
         ));
     }
-    let known_sources = CompileService::allowed_source_refs_for_plan(
+    let known_sources = CompileService::validate_candidate(
         context,
+        &descriptor.candidate,
         &resolved_sources,
-        &descriptor.candidate.plan,
-    )?;
-    CompileService::validate_workflow_manifest_semantics(
-        context,
-        &descriptor.candidate.manifest,
-        Some(&descriptor.candidate.plan),
-        &known_sources,
+        CompileGenerationPolicy::WorkflowReviewableDeletes,
     )?;
     let mut summary = CompileService::classify_workflow_changes(
         context,
@@ -1269,6 +1253,7 @@ fn apply_persisted_update_wiki_candidate(
         &descriptor,
         checkpoint_hash.as_deref(),
         &metadata_before,
+        mode == UpdateWikiMode::FullRecompile,
         services,
     )?;
     sink.complete(REVIEW_RISK).map_err(task_error)?;
@@ -1277,7 +1262,8 @@ fn apply_persisted_update_wiki_candidate(
     let mut metadata_paths = vec![format!(".app/compile/{task_id}.json")];
     metadata_paths.extend(
         descriptor
-            .source_versions
+            .candidate
+            .consumed_source_versions()
             .iter()
             .filter(|reference| !reference.source_id.starts_with("legacy-"))
             .map(|reference| format!(".app/sources/{}.json", reference.source_id)),
@@ -1530,7 +1516,8 @@ fn checkpoint_reviewed_inputs(
     paths = vec![format!(".app/compile/{}.json", run.task_id)];
     paths.extend(
         descriptor
-            .source_versions
+            .candidate
+            .consumed_source_versions()
             .iter()
             .filter(|source| !source.source_id.starts_with("legacy-"))
             .map(|source| format!(".app/sources/{}.json", source.source_id)),
@@ -1558,6 +1545,7 @@ fn prepare_planned_history(
     descriptor: &PersistedUpdateWikiCandidate,
     checkpoint_hash: Option<&str>,
     metadata_before: &std::collections::BTreeMap<String, Option<Vec<u8>>>,
+    allow_recompile: bool,
     services: &UpdateWikiExecutionServices<'_>,
 ) -> Result<PreparedCompileConsumption, BackendError> {
     let manifest = &descriptor.candidate.manifest;
@@ -1577,7 +1565,7 @@ fn prepare_planned_history(
         .collect::<Vec<_>>();
     affected_paths.sort();
     affected_paths.dedup();
-    let prepared = SourceRegistry::prepare_compile_consumption(
+    let prepared = SourceRegistry::prepare_compile_consumption_with_policy(
         context,
         services.file_store,
         &CompileConsumptionRecord {
@@ -1585,18 +1573,11 @@ fn prepare_planned_history(
             compile_task_id: task_id.into(),
             route: descriptor.candidate.route.legacy_kind(),
             consumed_at: chrono::Utc::now().to_rfc3339(),
-            source_versions: descriptor
-                .candidate
-                .source_outcomes
-                .iter()
-                .filter(|outcome| {
-                    outcome.status != crate::models::compile::CompileSourceOutcomeStatus::Deferred
-                })
-                .map(|outcome| outcome.source_version.clone())
-                .collect(),
+            source_versions: descriptor.candidate.consumed_source_versions(),
             affected_paths,
             checkpoint: checkpoint_hash.map(str::to_string),
         },
+        allow_recompile,
     )?;
     if &prepared.before != metadata_before {
         return Err(BackendError::new(
@@ -3183,12 +3164,11 @@ fn load_update_wiki_candidate_for_workflow(
     else {
         return None;
     };
-    let known_sources = CompileService::known_source_refs_for_sources(&resolved_sources);
-    CompileService::validate_workflow_manifest_semantics(
+    CompileService::validate_candidate(
         &context,
-        &descriptor.candidate.manifest,
-        Some(&descriptor.candidate.plan),
-        &known_sources,
+        &descriptor.candidate,
+        &resolved_sources,
+        CompileGenerationPolicy::WorkflowReviewableDeletes,
     )
     .ok()?;
     Some(descriptor)

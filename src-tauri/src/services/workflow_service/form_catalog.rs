@@ -47,6 +47,7 @@ impl WorkflowService {
             ));
         }
         let mut options = self.update_wiki_options(context, settings)?;
+        let explicit_default = settings.read_settings(context)?.ai_default_route;
         if kind == WorkflowKind::HealthCheck {
             options.routes.retain(|route| match route {
                 WorkflowRouteSelection::Agent { agent } => {
@@ -54,11 +55,13 @@ impl WorkflowService {
                 }
                 WorkflowRouteSelection::Byok { .. } => true,
             });
-            // Complete Health requires an explicit provider selection. A sole
-            // configured provider must not turn local Health into remote work.
+            // A saved explicit AI default applies to Complete Health. A sole
+            // provider inferred by legacy settings remains an explicit choice;
+            // Local Quick Health still resolves to the local runner by scope.
             options.default_route = options.default_route.filter(|route| {
-                matches!(route, WorkflowRouteSelection::Agent { .. })
-                    && options.routes.contains(route)
+                explicit_default.as_ref() == Some(route)
+                    || (matches!(route, WorkflowRouteSelection::Agent { .. })
+                        && options.routes.contains(route))
             });
         }
         let wiki_pages = if kind == WorkflowKind::GenerateContent {
@@ -91,7 +94,13 @@ impl WorkflowService {
                         *output_path = None;
                     }
                     WorkflowRememberedDraft {
-                        route_selection: route_selection(&entry.route),
+                        // Restore the scope, but let a newly selected project
+                        // default win over a previous operation's engine.
+                        route_selection: if explicit_default.is_some() {
+                            None
+                        } else {
+                            route_selection(&entry.route)
+                        },
                         scope,
                     }
                 })

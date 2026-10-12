@@ -17,7 +17,7 @@ use crate::services::{
 };
 use crate::tasks::task_model::LogLevel;
 use crate::tasks::TaskService;
-use crate::utils::markdown_utils::{parse_frontmatter, split_frontmatter};
+use crate::utils::markdown_utils::split_frontmatter;
 use crate::utils::private_directory::{create_private_directory, ensure_private_directory};
 use crate::utils::safe_project_dir::{
     remove_project_file, rename_project_file, BoundProjectMutationRoot,
@@ -29,6 +29,9 @@ mod byok_batch_cache;
 #[path = "compile_service/links.rs"]
 mod links;
 use byok_batch_cache::ByokBatchCache;
+#[path = "compile_service/source_context.rs"]
+mod source_context;
+use source_context::SourceContext;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompileApplyOutcome {
@@ -140,7 +143,7 @@ pub struct CompileService;
 
 impl CompileService {
     pub fn provider_prompt(workspace: &Path, language: &str) -> Result<String, BackendError> {
-        let mut prompt = String::from("Return only JSON matching {files:[{path,content}],deletions:[],summary}.\nCreate real DERIVED content pages under wiki/ — entity pages in wiki/entities/, concept pages in wiki/concepts/, and synthesis/comparison pages as schema.md dictates, that synthesize ACROSS the sources. Do NOT return only the index files. wiki/sources/ already holds the verbatim imported originals: READ them as authoritative and CITE them, but NEVER create, modify, or delete any file under wiki/sources/. Cite sources on every derived page two ways: (1) a frontmatter `sources: [\"<original-source-filename>\"]` array, and (2) a human-readable `> Sources:` line linking to the originals. Paths must be wiki/*.md (never wiki/sources/*) and must include wiki/index.md, wiki/overview.md, wiki/log.md. Never delete pages.\n");
+        let mut prompt = String::from("Return only JSON matching {files:[{path,content}],deletions:[],summary}.\nCreate real DERIVED content pages under wiki/ — entity pages in wiki/entities/, concept pages in wiki/concepts/, and synthesis/comparison pages as schema.md dictates, that synthesize ACROSS the sources. Do NOT return only the index files. wiki/sources/ already holds the verbatim imported originals: READ them as authoritative and CITE them, but NEVER create, modify, or delete any file under wiki/sources/. Cite sources on every derived page two ways: (1) a frontmatter `sources: [\"wiki/sources/.../original.md\"]` array, and (2) a human-readable `> Sources:` line linking to the originals. Paths must be wiki/*.md (never wiki/sources/*) and must include wiki/index.md, wiki/overview.md, wiki/log.md. Never delete pages.\n");
         prompt.push_str(&crate::services::render_compile_core_instructions());
         prompt.push('\n');
         prompt.push_str(&crate::utils::i18n::language_instruction(language));
@@ -187,7 +190,7 @@ impl CompileService {
         );
         prompt.push('\n');
         if policy == CompileGenerationPolicy::WorkflowReviewableDeletes {
-            prompt.push_str("Every selected Source must appear in sourceIds of a derived plan item, or in sourceDecisions with a reason. sourceDecisions entries use {sourceId,status,reason,evidencePath,evidenceExcerpt}; status is deferred or already_covered. Deferred Sources remain unprocessed. already_covered requires an existing Wiki page path and an exact excerpt proving the prior coverage; the user reviews this decision. Never omit a Source while reporting success.\n");
+            prompt.push_str("Every selected Source must appear in sourceIds of a derived plan item, or in sourceDecisions with a reason. If all selected Sources are deferred or already covered, return items: [] and complete sourceDecisions; no navigation or log rewrite is needed. sourceDecisions entries use {sourceId,status,reason,evidencePath,evidenceExcerpt}; status is deferred or already_covered. Deferred Sources remain unprocessed. already_covered requires an existing Wiki page path and an exact excerpt proving the prior coverage; the user reviews this decision. Never omit a Source while reporting success.\n");
         } else {
             prompt.push_str("Every selected Source must appear in sourceIds of at least one derived plan item. If a Source cannot be integrated, stop and explain why; never omit it while reporting success.\n");
         }
@@ -310,7 +313,7 @@ impl CompileService {
         task_id: &str,
         baseline: &HashMap<String, String>,
         sources: &[ResolvedCompileSource],
-        protected_sources: &HashMap<String, String>,
+        _protected_sources: &HashMap<String, String>,
         route: ResolvedCompileRoute,
         policy: CompileGenerationPolicy,
         services: &CompileExecutionServices<'_>,
@@ -321,12 +324,8 @@ impl CompileService {
             .read_settings(context)
             .map(|settings| settings.language)
             .unwrap_or_else(|_| "en".to_string());
-        let reviewable_workspace_paths = if policy.allows_reviewable_deletions() {
-            Some(Self::workspace_candidate_paths(workspace)?)
-        } else {
-            None
-        };
-        let (plan, manifest) = match &route {
+        let source_context = SourceContext::new(context, workspace, sources)?;
+        let (plan, manifest, source_dependencies) = match &route {
             ResolvedCompileRoute::Agent { agent, .. } => {
                 let installed = services.agent_service.detect_agent(*agent, true).state
                     == AgentDetectionState::Installed;
@@ -346,116 +345,47 @@ impl CompileService {
                         format!("Running {}", agent.command()),
                     )
                     .map_err(task_operation_error)?;
-                if policy == CompileGenerationPolicy::WorkflowReviewableDeletes
-                    || *agent != AgentKind::Claude
-                    || cfg!(windows)
-                {
-                    // One-shot CLIs return the same validated plan/manifest
-                    // protocol as BYOK. The backend owns all candidate files;
-                    // no CLI-specific write tool or Windows sandbox is needed.
-                    let plan_prompt =
-                        Self::provider_plan_prompt_with_policy(workspace, &language, policy)?;
-                    let plan_invocation =
-                        AgentService::chat_invocation(*agent, workspace, &plan_prompt)?;
-                    let raw_plan = services.agent_service.run_task_streaming_for_agent(
-                        *agent,
-                        &plan_invocation,
-                        services.task_service,
-                        task_id,
-                    )?;
-                    let plan = Self::parse_plan(&raw_plan)?;
-                    validate_compile_plan(context, &plan, baseline, sources)?;
-                    Self::ensure_plan_target_context(context, workspace, &plan, baseline)?;
-                    observer.begin_candidate_generation()?;
-                    let manifest_prompt = Self::provider_manifest_prompt_with_policy(
-                        workspace,
-                        &language,
-                        Some(&plan),
-                        policy,
-                    )?;
-                    let manifest_invocation =
-                        AgentService::chat_invocation(*agent, workspace, &manifest_prompt)?;
-                    let raw_manifest = services.agent_service.run_task_streaming_for_agent(
-                        *agent,
-                        &manifest_invocation,
-                        services.task_service,
-                        task_id,
-                    )?;
-                    observer.begin_validation()?;
-                    let manifest = Self::parse_manifest_with_policy(
-                        &raw_manifest,
-                        policy.allows_reviewable_deletions(),
-                    )?;
-                    let known_sources =
-                        Self::allowed_source_refs_for_plan(context, sources, &plan)?;
-                    Self::validate_manifest_semantics_with_policy(
-                        context,
-                        &manifest,
-                        Some(&plan),
-                        &known_sources,
-                        policy.allows_reviewable_deletions(),
-                    )?;
-                    if policy == CompileGenerationPolicy::LegacyNoDeletes
-                        && !plan.source_decisions.is_empty()
-                    {
-                        return Err(BackendError::new("COMPILE_SOURCE_COVERAGE_INCOMPLETE", "This compile route requires every selected Source to be integrated into a derived page.", true, true));
-                    }
-                    return Ok(CompileCandidate {
-                        route,
-                        source_outcomes: source_outcomes_for_candidate(
-                            context, &plan, &manifest, sources,
-                        )?,
-                        plan,
-                        manifest,
-                    });
-                }
-                let mut prompt = Self::compile_prompt_with_policy(workspace, &language, policy);
-                let existing_pages = match reviewable_workspace_paths.as_ref() {
-                    Some(paths) => paths.clone(),
-                    None => Self::workspace_candidate_paths(workspace)?,
-                };
-                Self::append_agent_workspace_inventory(&mut prompt, sources, &existing_pages);
-                let invocation = AgentService::invocation(*agent, workspace, &prompt)?;
-                services.agent_service.run_task_streaming_for_agent(
+                // All Agent routes bind a plan before requesting candidate bodies.
+                let plan_prompt =
+                    Self::provider_plan_prompt_with_policy(workspace, &language, policy)?;
+                let invocation = AgentService::chat_invocation(*agent, workspace, &plan_prompt)?;
+                let raw_plan = services.agent_service.run_task_streaming_for_agent(
                     *agent,
                     &invocation,
                     services.task_service,
                     task_id,
                 )?;
-                let plan = read_agent_compile_plan(workspace)?;
-                validate_compile_plan(context, &plan, baseline, sources)?;
-                observer.begin_candidate_generation()?;
-                observer.begin_validation()?;
-                let manifest = Self::manifest_from_workspace_protected_with_policy(
-                    workspace,
-                    baseline,
-                    protected_sources,
-                    policy,
-                    reviewable_workspace_paths.as_ref(),
-                )?;
-                let known_sources = Self::allowed_source_refs_for_plan(context, sources, &plan)?;
-                Self::validate_manifest_semantics_with_policy(
+                let mut plan = Self::parse_plan(&raw_plan)?;
+                let dependencies = prepare_bound_plan(
                     context,
-                    &manifest,
-                    Some(&plan),
-                    &known_sources,
-                    policy.allows_reviewable_deletions(),
+                    workspace,
+                    &mut plan,
+                    baseline,
+                    sources,
+                    &source_context,
+                    policy,
                 )?;
-                const SCAFFOLD: [&str; 3] = ["wiki/index.md", "wiki/overview.md", "wiki/log.md"];
-                if !manifest
-                    .files
-                    .iter()
-                    .any(|file| !SCAFFOLD.contains(&file.path.as_str()))
-                    && !sources.is_empty()
-                {
-                    return Err(BackendError::new(
-                        "COMPILE_EMPTY_OUTPUT",
-                        "Agent finished but wrote no wiki pages. This usually means the agent lacked write permission or hit an upstream API error.",
-                        true,
-                        false,
-                    ));
-                }
-                (plan, manifest)
+                observer.begin_candidate_generation()?;
+                let manifest = if plan.items.is_empty() {
+                    empty_manifest(&plan)
+                } else {
+                    let prompt = Self::provider_manifest_prompt_with_policy(
+                        workspace,
+                        &language,
+                        Some(&plan),
+                        policy,
+                    )?;
+                    let invocation = AgentService::chat_invocation(*agent, workspace, &prompt)?;
+                    let raw = services.agent_service.run_task_streaming_for_agent(
+                        *agent,
+                        &invocation,
+                        services.task_service,
+                        task_id,
+                    )?;
+                    Self::parse_manifest_with_policy(&raw, policy.allows_reviewable_deletions())?
+                };
+                observer.begin_validation()?;
+                (plan, manifest, dependencies)
             }
             ResolvedCompileRoute::Byok { provider, model } => {
                 let providers = LlmService::list_providers(context)?;
@@ -524,7 +454,7 @@ impl CompileService {
                     batch_cache.as_ref(),
                 )
                 .await;
-                let plan = match plan {
+                let mut plan = match plan {
                     Ok(plan) => plan,
                     Err(error) => {
                         if matches!(
@@ -540,16 +470,23 @@ impl CompileService {
                         return Err(error);
                     }
                 };
-                if let Err(error) = validate_compile_plan(context, &plan, baseline, sources)
-                    .and_then(|_| {
-                        Self::ensure_plan_target_context(context, workspace, &plan, baseline)
-                    })
-                {
-                    if let Some(cache) = &batch_cache {
-                        let _ = cache.cleanup();
+                let dependencies = match prepare_bound_plan(
+                    context,
+                    workspace,
+                    &mut plan,
+                    baseline,
+                    sources,
+                    &source_context,
+                    policy,
+                ) {
+                    Ok(dependencies) => dependencies,
+                    Err(error) => {
+                        if let Some(cache) = &batch_cache {
+                            let _ = cache.cleanup();
+                        }
+                        return Err(error);
                     }
-                    return Err(error);
-                }
+                };
                 observer.begin_candidate_generation()?;
                 services
                     .task_service
@@ -559,13 +496,16 @@ impl CompileService {
                         format!("Calling {:?} for compile manifest", provider),
                     )
                     .map_err(task_operation_error)?;
-                let manifest = if policy == CompileGenerationPolicy::WorkflowReviewableDeletes {
+                let manifest = if plan.items.is_empty() {
+                    empty_manifest(&plan)
+                } else if policy == CompileGenerationPolicy::WorkflowReviewableDeletes {
                     generate_byok_manifest_pages(
                         workspace,
                         task_id,
                         &language,
                         &plan,
                         sources,
+                        &dependencies,
                         &config,
                         secret.as_deref(),
                         services,
@@ -605,7 +545,8 @@ impl CompileService {
                     )?
                 };
                 observer.begin_validation()?;
-                let known_sources = Self::allowed_source_refs_for_plan(context, sources, &plan)?;
+                let known_sources =
+                    source_context::validate_bound_sources(context, sources, &dependencies)?;
                 if let Err(error) = Self::validate_manifest_semantics_with_policy(
                     context,
                     &manifest,
@@ -627,18 +568,21 @@ impl CompileService {
                         );
                     }
                 }
-                (plan, manifest)
+                (plan, manifest, dependencies)
             }
         };
         if policy == CompileGenerationPolicy::LegacyNoDeletes && !plan.source_decisions.is_empty() {
             return Err(BackendError::new("COMPILE_SOURCE_COVERAGE_INCOMPLETE", "This compile route requires every selected Source to be integrated into a derived page.", true, true));
         }
-        Ok(CompileCandidate {
+        let candidate = CompileCandidate {
+            source_dependencies,
             route,
             source_outcomes: source_outcomes_for_candidate(context, &plan, &manifest, sources)?,
             plan,
             manifest,
-        })
+        };
+        Self::validate_candidate(context, &candidate, sources, policy)?;
+        Ok(candidate)
     }
 
     fn append_workspace_markdown(
@@ -738,7 +682,7 @@ impl CompileService {
                 let manifest = SourceRegistry::read_manifest(
                     context,
                     &files,
-                    &format!(".app/sources/{source_id}.json"),
+                    &context.layout.source_paths()?.manifest(&source_id)?,
                 )?;
                 let version = manifest
                     .versions
@@ -840,23 +784,26 @@ impl CompileService {
                 true,
             ));
         }
-        if !context.app_dir.join("source-index-v2.json").is_file() {
-            return Ok(CompileLegacyAdapter::resolve(context, requested)?
-                .into_iter()
-                .map(|source| ResolvedCompileSource {
+        let files = FileStore;
+        let index = SourceRegistry::read_index(context, &files)?;
+        let mut resolved = Vec::with_capacity(requested.len());
+        for reference in requested {
+            if reference.source_id.starts_with("legacy-") {
+                let source =
+                    CompileLegacyAdapter::resolve(context, std::slice::from_ref(reference))?
+                        .into_iter()
+                        .next()
+                        .ok_or_else(invalid_source_version)?;
+                resolved.push(ResolvedCompileSource {
                     workspace_path: source.project_path.clone(),
                     project_path: source.project_path,
                     absolute_path: source.absolute_path,
                     reference: source.reference,
                     already_consumed: source.already_consumed,
                     registry: CompileSourceRegistry::Legacy,
-                })
-                .collect());
-        }
-        let files = FileStore;
-        let index = SourceRegistry::read_index(context, &files)?;
-        let mut resolved = Vec::with_capacity(requested.len());
-        for reference in requested {
+                });
+                continue;
+            }
             let validated =
                 SourceRegistry::resolve_compile_source_version(context, &files, &index, reference)?;
             let manifest = validated.manifest;
@@ -1031,7 +978,9 @@ impl CompileService {
         let plan: CompilePlan = serde_json::from_str(json).map_err(|error| {
             BackendError::new("COMPILE_PLAN_INVALID", error.to_string(), true, false)
         })?;
-        if plan.summary.trim().is_empty() || plan.items.is_empty() {
+        if plan.summary.trim().is_empty()
+            || (plan.items.is_empty() && plan.source_decisions.is_empty())
+        {
             return Err(BackendError::new(
                 "COMPILE_PLAN_INVALID",
                 "CompilePlan must include a summary and at least one item.",
@@ -1143,6 +1092,13 @@ impl CompileService {
                 || context.layout.wiki_overview_path.as_deref() == Some(relative.as_str())
                 || indexed_targets.contains(&stem)
                 || indexed_targets.contains(&relative.to_lowercase())
+                || indexed_targets.contains(
+                    relative
+                        .trim_start_matches("wiki/")
+                        .trim_end_matches(".md")
+                        .to_lowercase()
+                        .as_str(),
+                )
                 || (stem.chars().count() >= 2
                     && selected_bodies
                         .iter()
@@ -1369,31 +1325,6 @@ impl CompileService {
         Ok(manifest)
     }
 
-    fn workspace_candidate_paths(workspace: &Path) -> Result<HashSet<String>, BackendError> {
-        FileStore
-            .list_markdown_files(&workspace.join("wiki"))?
-            .into_iter()
-            .map(|absolute| {
-                absolute
-                    .strip_prefix(workspace)
-                    .map(|relative| relative.to_string_lossy().replace('\\', "/"))
-                    .map_err(|_| {
-                        BackendError::new(
-                            "COMPILE_PATH_INVALID",
-                            "Candidate path escaped workspace.",
-                            false,
-                            true,
-                        )
-                    })
-            })
-            .filter(|result| {
-                result
-                    .as_ref()
-                    .map_or(true, |path| !is_compile_protected_path(path))
-            })
-            .collect()
-    }
-
     pub fn compile_prompt(workspace: &Path, language: &str) -> String {
         Self::compile_prompt_with_policy(
             workspace,
@@ -1402,6 +1333,7 @@ impl CompileService {
         )
     }
 
+    #[cfg(test)]
     fn append_agent_workspace_inventory(
         prompt: &mut String,
         sources: &[ResolvedCompileSource],
@@ -1441,7 +1373,7 @@ impl CompileService {
              1. Read purpose.md, schema.md, every original in wiki/sources/ (the verbatim imported sources) and legacy raw/extracted/, plus the existing wiki/ tree.\n\
              2. wiki/sources/ is IMPORT-OWNED: it holds the verbatim extracted originals. READ them as authoritative and CITE them. NEVER create, modify, or delete any file under wiki/sources/.\n\
              3. CREATE derived Markdown pages under wiki/ — entity pages in wiki/entities/, concept pages in wiki/concepts/, and synthesis/comparison pages as the sources warrant. Synthesize ACROSS sources; do NOT write one page per source, and do NOT summarize or copy a source into another page. Name each derived page after the concept it covers, not after a source filename. You MUST produce real content pages — touching only the index files is a failure.\n\
-             4. On every derived page, cite sources two ways: a frontmatter `sources: [\"<original-source-filename>\"]` array (machine join key for the graph), and a human-readable `> Sources:` line of Markdown links to ../sources/<page>.md (or [[sources/<page>]]).\n\
+             4. On every derived page, cite sources two ways: a frontmatter `sources: [\"wiki/sources/.../original.md\"]` array (machine join key for the graph), and a human-readable `> Sources:` line of Markdown links to ../sources/<page>.md (or [[sources/<page>]]).\n\
              5. UPDATE wiki/index.md and wiki/overview.md to list and summarize the pages you created, and append a short entry to wiki/log.md. Cascade: after writing a page, update any other page materially affected by the new information.\n\
              6. Use project-relative Markdown links and [[wikilinks]]. {deletion_rule} Work only inside this workspace; do not access or modify anything outside it. Any shell commands you run must operate only within this workspace root and must never affect files, directories, or systems outside it.",
             workspace.to_string_lossy(),
@@ -1521,7 +1453,11 @@ impl CompileService {
             .with_details(serde_json::json!({ "deletions": manifest.deletions })));
         }
 
-        if policy.requires_compile_scaffold() {
+        if policy.requires_compile_scaffold()
+            && !(policy == CompileGenerationPolicy::WorkflowReviewableDeletes
+                && manifest.files.is_empty()
+                && manifest.deletions.is_empty())
+        {
             for required in ["wiki/index.md", "wiki/overview.md", "wiki/log.md"] {
                 if !manifest.files.iter().any(|file| file.path == required) {
                     return Err(BackendError::new(
@@ -1699,15 +1635,18 @@ impl CompileService {
         existing_pages: &[String],
         known_sources: &HashSet<String>,
     ) -> Result<(), BackendError> {
-        if plan.summary.trim().is_empty() || plan.items.is_empty() {
+        if plan.summary.trim().is_empty()
+            || (plan.items.is_empty() && plan.source_decisions.is_empty())
+        {
             return Err(plan_error(
                 "CompilePlan must include a summary and at least one item.",
             ));
         }
-        if plan
-            .items
-            .iter()
-            .all(|item| is_structural_page(&item.target_path))
+        if !plan.items.is_empty()
+            && plan
+                .items
+                .iter()
+                .all(|item| is_structural_page(&item.target_path))
         {
             return Err(plan_error(
                 "CompilePlan must include at least one derived page, not only structural pages.",
@@ -1821,7 +1760,11 @@ impl CompileService {
                 .iter()
                 .filter(|item| !is_structural_page(&item.target_path))
                 .collect();
-            if planned_derived.is_empty()
+            if (planned_derived.is_empty()
+                && !(plan.items.is_empty()
+                    && !plan.source_decisions.is_empty()
+                    && manifest.files.is_empty()
+                    && manifest.deletions.is_empty()))
                 || planned_derived
                     .iter()
                     .any(|item| !manifest_paths.contains(item.target_path.as_str()))
@@ -1853,7 +1796,15 @@ impl CompileService {
                     &file.path,
                 ));
             };
-            let frontmatter = parse_frontmatter(raw_frontmatter);
+            let frontmatter = crate::utils::markdown_utils::parse_frontmatter_checked(
+                raw_frontmatter,
+            )
+            .map_err(|_| {
+                manifest_semantic_error(
+                    "Derived page frontmatter must be valid YAML with unambiguous fields.",
+                    &file.path,
+                )
+            })?;
             let page_type = frontmatter
                 .get_scalar("type")
                 .filter(|value| !value.trim().is_empty())
@@ -1909,6 +1860,11 @@ impl CompileService {
                     &file.path,
                 ));
             }
+            links::validate_source_links(
+                &file.path,
+                &split.body,
+                &canonical_source_set(&sources, known_sources),
+            )?;
             if source_mirror_risk(&file.path, &split.body, &sources) {
                 return Err(BackendError::new(
                     "COMPILE_SOURCE_MIRROR_RISK",
@@ -1944,7 +1900,17 @@ impl CompileService {
         baseline: &HashMap<String, String>,
     ) -> Result<CompileApplyOutcome, BackendError> {
         let known_sources = Self::known_source_refs(context)?;
-        Self::validate_manifest_semantics(context, manifest, accepted_plan, &known_sources)?;
+        Self::apply_manifest_for_sources(context, manifest, accepted_plan, baseline, &known_sources)
+    }
+
+    pub(crate) fn apply_manifest_for_sources(
+        context: &ProjectContext,
+        manifest: &CompileManifest,
+        accepted_plan: Option<&CompilePlan>,
+        baseline: &HashMap<String, String>,
+        known_sources: &HashSet<String>,
+    ) -> Result<CompileApplyOutcome, BackendError> {
+        Self::validate_manifest_semantics(context, manifest, accepted_plan, known_sources)?;
         let store = FileStore;
         let mut affected_paths = Vec::new();
         let mut conflicts = Vec::new();
@@ -2006,6 +1972,23 @@ impl CompileService {
             expected_current_hashes,
             CompileGenerationPolicy::LegacyNoDeletes,
             None,
+        )
+    }
+
+    pub(crate) fn apply_confirmed_manifest_for_sources(
+        context: &ProjectContext,
+        manifest: &CompileManifest,
+        accepted_plan: Option<&CompilePlan>,
+        expected_current_hashes: &HashMap<String, String>,
+        known_sources: &HashSet<String>,
+    ) -> Result<Vec<String>, BackendError> {
+        Self::apply_confirmed_manifest_with_policy(
+            context,
+            manifest,
+            accepted_plan,
+            expected_current_hashes,
+            CompileGenerationPolicy::LegacyNoDeletes,
+            Some(known_sources),
         )
     }
 
@@ -2508,46 +2491,37 @@ impl CompileService {
         refs
     }
 
-    /// Existing target pages may retain references to older, still present
-    /// Sources. Only references already bound to a target page are admitted;
-    /// this does not authorize inventing evidence on a new page.
-    pub fn allowed_source_refs_for_plan(
+    pub(crate) fn bound_source_refs(
         context: &ProjectContext,
         selected: &[ResolvedCompileSource],
-        plan: &CompilePlan,
+        dependencies: &[crate::models::compile::CompileSourceDependency],
     ) -> Result<HashSet<String>, BackendError> {
-        let mut refs = Self::known_source_refs_for_sources(selected);
-        let source_root = context
-            .layout
-            .source_write_root
-            .as_deref()
-            .unwrap_or("wiki/sources");
-        for item in &plan.items {
-            let target = context.resolve_project_path(&item.target_path)?;
-            if !target.is_file() {
-                continue;
-            }
-            let old = FileStore.read_markdown(context, &item.target_path)?;
-            let split = split_frontmatter(&old);
-            let Some(frontmatter) = split.frontmatter.as_deref() else {
-                continue;
-            };
-            for raw in parse_frontmatter(frontmatter).get_list("sources") {
-                let normalized = raw.trim().replace('\\', "/");
-                if normalized.is_empty() || source_ref_known(&normalized, &refs) {
-                    continue;
-                }
-                let candidate = if normalized.contains('/') {
-                    normalized.clone()
-                } else {
-                    format!("{source_root}/{normalized}")
-                };
-                if context.resolve_project_path(&candidate)?.is_file() {
-                    refs.insert(candidate);
-                }
+        source_context::validate_bound_sources(context, selected, dependencies)
+    }
+
+    pub(crate) fn validate_candidate(
+        context: &ProjectContext,
+        candidate: &CompileCandidate,
+        selected: &[ResolvedCompileSource],
+        policy: CompileGenerationPolicy,
+    ) -> Result<HashSet<String>, BackendError> {
+        let known = Self::bound_source_refs(context, selected, &candidate.source_dependencies)?;
+        let mut existing = Vec::new();
+        for item in &candidate.plan.items {
+            if context.resolve_project_path(&item.target_path)?.is_file() {
+                existing.push(item.target_path.clone());
             }
         }
-        Ok(refs)
+        Self::validate_plan(context, &candidate.plan, &existing, &known)?;
+        Self::validate_workflow_source_outcomes(context, candidate, selected)?;
+        Self::validate_manifest_semantics_with_policy(
+            context,
+            &candidate.manifest,
+            Some(&candidate.plan),
+            &known,
+            policy.allows_reviewable_deletions(),
+        )?;
+        Ok(known)
     }
 
     pub fn validate_selected_source_coverage_for_workflow(
@@ -2581,32 +2555,33 @@ impl CompileService {
     }
 }
 
-fn read_agent_compile_plan(workspace: &Path) -> Result<CompilePlan, BackendError> {
-    let plan_path = workspace.join("compile-plan.json");
-    let raw = std::fs::read_to_string(&plan_path).map_err(|error| {
-        BackendError::new(
-            "COMPILE_PLAN_MISSING",
-            format!(
-                "Agent compile must write compile-plan.json before candidate files are accepted: {error}"
-            ),
-            true,
-            false,
-        )
-        .with_details(serde_json::json!({ "path": plan_path.to_string_lossy() }))
-    })?;
-    CompileService::parse_plan(&raw)
+fn empty_manifest(plan: &CompilePlan) -> CompileManifest {
+    CompileManifest {
+        files: Vec::new(),
+        deletions: Vec::new(),
+        summary: plan.summary.clone(),
+    }
 }
 
-fn validate_compile_plan(
+fn prepare_bound_plan(
     context: &ProjectContext,
-    plan: &CompilePlan,
+    workspace: &Path,
+    plan: &mut CompilePlan,
     baseline: &HashMap<String, String>,
-    sources: &[ResolvedCompileSource],
-) -> Result<(), BackendError> {
-    let known_sources = CompileService::allowed_source_refs_for_plan(context, sources, plan)?;
+    selected: &[ResolvedCompileSource],
+    source_context: &SourceContext,
+    policy: CompileGenerationPolicy,
+) -> Result<Vec<crate::models::compile::CompileSourceDependency>, BackendError> {
+    if policy == CompileGenerationPolicy::LegacyNoDeletes && !plan.source_decisions.is_empty() {
+        return Err(BackendError::new("COMPILE_SOURCE_COVERAGE_INCOMPLETE", "This compile route requires every selected Source to be integrated into a derived page.", true, true));
+    }
+    let dependencies = source_context.bind_plan(context, workspace, plan, baseline)?;
+    let known = source_context::validate_bound_sources(context, selected, &dependencies)?;
     let existing_pages = baseline.keys().cloned().collect::<Vec<_>>();
-    CompileService::validate_plan(context, plan, &existing_pages, &known_sources)?;
-    validate_selected_source_coverage(plan, sources, &known_sources)
+    CompileService::validate_plan(context, plan, &existing_pages, &known)?;
+    validate_selected_source_coverage(plan, selected, &known)?;
+    CompileService::ensure_plan_target_context(context, workspace, plan, baseline)?;
+    Ok(dependencies)
 }
 
 fn compile_output_token_limit(config: &LlmProviderConfig) -> u64 {
@@ -2862,6 +2837,7 @@ async fn generate_byok_manifest_pages(
     language: &str,
     plan: &CompilePlan,
     sources: &[ResolvedCompileSource],
+    dependencies: &[crate::models::compile::CompileSourceDependency],
     config: &LlmProviderConfig,
     secret: Option<&str>,
     services: &CompileExecutionServices<'_>,
@@ -2880,7 +2856,21 @@ async fn generate_byok_manifest_pages(
     }
     targets.sort();
     targets.dedup();
-    let known_sources = CompileService::known_source_refs_for_sources(sources);
+    let mut known_sources = CompileService::known_source_refs_for_sources(sources);
+    known_sources.extend(
+        dependencies
+            .iter()
+            .map(|dependency| dependency.workspace_path.clone()),
+    );
+    let evidence_paths = sources
+        .iter()
+        .map(|source| source.workspace_path.as_str())
+        .chain(
+            dependencies
+                .iter()
+                .map(|dependency| dependency.workspace_path.as_str()),
+        )
+        .collect::<Vec<_>>();
     let mut files = Vec::new();
     for (index, target) in targets.iter().enumerate() {
         let item = plan.items.iter().find(|item| &item.target_path == target);
@@ -2925,21 +2915,20 @@ async fn generate_byok_manifest_pages(
             prompt.push_str(&format!("\n--- Existing {target}; preserve valid old knowledge and citations ---\n{content}\n"));
         }
         if let Some(item) = item {
-            for source in sources {
+            for source_path in &evidence_paths {
                 if item.source_ids.iter().any(|raw| {
-                    canonical_source_ref(raw, &known_sources).as_deref()
-                        == Some(source.workspace_path.as_str())
+                    canonical_source_ref(raw, &known_sources).as_deref() == Some(*source_path)
                 }) {
-                    let content = std::fs::read_to_string(workspace.join(&source.workspace_path))
-                        .map_err(|error| {
-                        BackendError::new(
-                            "COMPILE_INPUT_READ_FAILED",
-                            error.to_string(),
-                            true,
-                            false,
-                        )
-                    })?;
-                    prompt.push_str(&format!("\n--- {} ---\n{content}\n", source.workspace_path,));
+                    let content =
+                        std::fs::read_to_string(workspace.join(source_path)).map_err(|error| {
+                            BackendError::new(
+                                "COMPILE_INPUT_READ_FAILED",
+                                error.to_string(),
+                                true,
+                                false,
+                            )
+                        })?;
+                    prompt.push_str(&format!("\n--- {} ---\n{content}\n", source_path,));
                 }
             }
         }
@@ -3350,25 +3339,29 @@ fn source_ref_known(raw: &str, known_sources: &HashSet<String>) -> bool {
 }
 
 fn canonical_source_ref(raw: &str, known_sources: &HashSet<String>) -> Option<String> {
-    let normalized = raw.trim().replace('\\', "/");
+    use unicode_normalization::UnicodeNormalization;
+    let normalized = raw.trim().replace('\\', "/").nfc().collect::<String>();
     if normalized.is_empty() {
         return None;
     }
-    if normalized.contains('/') && known_sources.contains(&normalized) {
-        return Some(normalized);
+    let normalized_path = |path: &str| path.nfc().collect::<String>();
+    if normalized.contains('/') {
+        let mut exact = known_sources
+            .iter()
+            .filter(|path| normalized_path(path) == normalized);
+        if let Some(path) = exact.next() {
+            return exact.next().is_none().then(|| path.clone());
+        }
     }
-    // The allowed set contains full paths and display filename aliases.
-    // Resolve aliases before membership so plan paths and frontmatter names
-    // identify the same approved source; ambiguous filenames fail closed.
     let mut paths = known_sources.iter().filter(|path| {
         path.contains('/')
-            && (*path == &format!("wiki/sources/{normalized}")
-                || *path == &format!("raw/extracted/{normalized}")
+            && (normalized_path(path) == format!("wiki/sources/{normalized}")
+                || normalized_path(path) == format!("raw/extracted/{normalized}")
                 || (!normalized.contains('/')
-                    && Path::new(path.as_str())
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        == Some(normalized.as_str())))
+                    && path
+                        .rsplit('/')
+                        .next()
+                        .is_some_and(|name| normalized_path(name) == normalized)))
     });
     if let Some(path) = paths.next() {
         return paths.next().is_none().then(|| path.clone());
@@ -3430,7 +3423,7 @@ fn manifest_semantic_error(message: &str, path: &str) -> BackendError {
 fn source_ref_error(path: &str, source: &str) -> BackendError {
     BackendError::new(
         "COMPILE_SOURCE_REF_INVALID",
-        "Compile output references a source that does not exist in wiki/sources/ or legacy raw/extracted/.",
+        "Compile source reference is missing, ambiguous, or outside the bound Source inputs. Use its exact project-relative Source path.",
         true,
         true,
     )
@@ -4123,6 +4116,35 @@ mod tests {
             .expect_err("compile cannot plan only structural pages");
         assert_eq!(error.code, "COMPILE_PLAN_INVALID");
         fs::remove_dir_all(context.root).ok();
+    }
+
+    #[test]
+    fn generated_yaml_citations_use_yaml_syntax_not_comma_splitting() {
+        let context = temp_project_context("yaml-source-citations");
+        let sources = HashSet::from(["wiki/sources/local/资料,a.md".to_string()]);
+        for frontmatter in [
+            "sources: [\"资料,a.md\"] # provenance",
+            "sources:\n  - '资料,a.md' # provenance",
+            "sources: [\n  '资料,a.md',\n]",
+        ] {
+            let manifest = valid_manifest_with(CompileFile::new("wiki/concepts/topic.md", format!("---\ntype: concept\n{frontmatter}\n---\n# Topic\n> Sources: [[sources/local/资料,a]]")));
+            CompileService::validate_manifest_semantics(&context, &manifest, None, &sources)
+                .unwrap();
+        }
+        for invalid in [
+            "sources: [资料,a.md",
+            "sources: [42]",
+            "sources: [\"资料,a.md\"]\nsources: []",
+        ] {
+            let manifest = valid_manifest_with(CompileFile::new("wiki/concepts/topic.md", format!("---\ntype: concept\n{invalid}\n---\n# Topic\n> Sources: [[sources/local/资料,a]]")));
+            assert_eq!(
+                CompileService::validate_manifest_semantics(&context, &manifest, None, &sources)
+                    .unwrap_err()
+                    .code,
+                "COMPILE_MANIFEST_SEMANTIC_INVALID"
+            );
+        }
+        fs::remove_dir_all(context.root).unwrap();
     }
 
     #[test]
@@ -5222,7 +5244,7 @@ mod tests {
             already_consumed: false,
             registry: CompileSourceRegistry::V2,
         };
-        let plan = CompilePlan {
+        let mut plan = CompilePlan {
             summary: "merge".into(),
             items: vec![CompilePlanItem {
                 action: CompileAction::Merge,
@@ -5236,8 +5258,20 @@ mod tests {
             global_risk_flags: vec![],
             source_decisions: Vec::new(),
         };
+        fs::create_dir_all(root.path().join(".app")).unwrap();
+        fs::write(
+            root.path().join(".app/source-index.json"),
+            r#"{"sources":{}}"#,
+        )
+        .unwrap();
+        let scope = SourceContext::new(&context, root.path(), &[source.clone()]).unwrap();
+        let baseline = CompileService::snapshot_wiki(&context).unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let dependencies = scope
+            .bind_plan(&context, workspace.path(), &mut plan, &baseline)
+            .unwrap();
         let known =
-            CompileService::allowed_source_refs_for_plan(&context, &[source.clone()], &plan)
+            source_context::validate_bound_sources(&context, &[source.clone()], &dependencies)
                 .unwrap();
         assert!(known.contains("wiki/sources/旧.md"));
         CompileService::validate_plan(&context, &plan, &["wiki/concepts/topic.md".into()], &known)

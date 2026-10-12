@@ -126,13 +126,13 @@ describe("settingsStore language request ownership", () => {
   it("does not let an older settings load overwrite a user save", async () => {
     Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
     let resolveLoad!: (settings: typeof defaultSettings) => void;
-    invokeMock.mockImplementation((command: string, args?: { request?: { settings?: typeof defaultSettings } }) => {
+    invokeMock.mockImplementation((command: string, args?: { patch?: Partial<typeof defaultSettings> }) => {
       if (command === "get_settings") {
         return new Promise<typeof defaultSettings>((resolve) => {
           resolveLoad = resolve;
         });
       }
-      if (command === "save_settings") return Promise.resolve(args?.request?.settings);
+      if (command === "patch_global_preferences") return Promise.resolve({ ...defaultSettings, ...args?.patch });
       return Promise.resolve(undefined);
     });
 

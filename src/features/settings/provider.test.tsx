@@ -54,7 +54,7 @@ describe("AiSettings BYOK providers", () => {
     fireEvent.change(input, { target: { value: "sk-secret-value" } });
     fireEvent.click(screen.getByRole("button", { name: /save key/i }));
 
-    await screen.findByText(/saved/i);
+    await waitFor(() => expect(input.value).toBe(""));
     expect(saveSecret).toHaveBeenCalledWith("anthropic", "sk-secret-value");
     expect(input.value).toBe("");
     expect(screen.queryByText("sk-secret-value")).not.toBeInTheDocument();

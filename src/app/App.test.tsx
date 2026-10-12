@@ -7,6 +7,7 @@ import { useNavigationStore } from "../stores/navigationStore";
 import { useProjectStore } from "../stores/projectStore";
 import { useTaskStore } from "../stores/taskStore";
 import { useToastStore } from "../stores/toastStore";
+import { defaultSettings, useSettingsStore } from "../stores/settingsStore";
 import type { OpenedProject, ProjectSessionAuthority, ProjectSummary } from "../types/project";
 import type { BackendTask } from "../types/task";
 import type { WikiPageContent } from "../types/wiki";
@@ -133,6 +134,7 @@ beforeEach(() => {
   delete (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
   window.localStorage.clear();
   useToastStore.setState({ toasts: [] });
+  useSettingsStore.setState({ settings: { ...defaultSettings }, globalLoaded: false, globalError: null });
   useGraphStore.getState().reset();
   useNavigationStore.getState().setActiveView("dashboard");
   useNavigationStore.getState().setRightPanelOpen(true);
@@ -344,6 +346,29 @@ describe("App", () => {
     expect(screen.queryByText("BYOK fallback")).not.toBeInTheDocument();
   });
 
+  it("loads durable application preferences on startup without blocking the no-project shell", async () => {
+    useProjectStore.getState().setCurrentProject(sampleProject({ projectId: "", name: "", rootPath: "" }));
+    window.localStorage.setItem("llm-wiki-desktop.language", "en");
+    window.localStorage.setItem("llm-wiki-desktop.theme", "light");
+    let resolvePreferences!: (value: typeof defaultSettings) => void;
+    const preferences = new Promise<typeof defaultSettings>((resolve) => { resolvePreferences = resolve; });
+    Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
+    invokeMock.mockImplementation((command: string) => command === "get_global_preferences" ? preferences : Promise.resolve([]));
+
+    render(<App />);
+    expect(screen.getByRole("heading", { name: "Workspace" })).toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("get_global_preferences"));
+    resolvePreferences({ ...defaultSettings, language: "zh-CN", theme: "dark", colorThemePreset: "paper" });
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "中文" })).toHaveAttribute("aria-pressed", "true"));
+    await waitFor(() => expect(useSettingsStore.getState().globalLoading).toBe(false));
+    expect(document.documentElement.dataset).toMatchObject({ theme: "dark", colorThemePreset: "paper" });
+    expect(window.localStorage.getItem("llm-wiki-desktop.language")).toBe("zh-CN");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(invokeMock.mock.calls.some(([command]) => command === "get_settings")).toBe(false);
+  });
+
   it("opens global language and theme preferences before a project is selected", async () => {
     useProjectStore.getState().setCurrentProject(sampleProject({ projectId: "", name: "", rootPath: "" }));
     Object.defineProperty(window, "__TAURI_INTERNALS__", {
@@ -351,19 +376,21 @@ describe("App", () => {
       configurable: true,
     });
     invokeMock.mockImplementation((command: string) => {
-      if (command === "get_global_ui_preferences") return Promise.resolve({ language: "en", theme: "auto" });
-      if (command === "save_global_ui_preferences") return Promise.resolve({ language: "en", theme: "dark" });
+      if (command === "get_global_preferences") return Promise.resolve({ ...defaultSettings });
+      if (command === "patch_global_preferences") return Promise.resolve({ ...defaultSettings, theme: "dark" });
       return Promise.resolve([]);
     });
 
+    useSettingsStore.setState({ settings: { ...defaultSettings }, globalLoaded: false, globalError: null });
     render(<App />);
     fireEvent.click(screen.getByRole("button", { name: "Settings" }));
     expect(await screen.findByRole("dialog", { name: "Settings" })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Low-glare shell for longer sessions." }));
+    fireEvent.click(await screen.findByRole("button", { name: "Appearance" }));
+    fireEvent.click(screen.getByRole("radio", { name: "Dark" }));
 
     await waitFor(() =>
-      expect(invokeMock).toHaveBeenCalledWith("save_global_ui_preferences", {
-        preferences: { language: "en", theme: "dark" },
+      expect(invokeMock).toHaveBeenCalledWith("patch_global_preferences", {
+        patch: { theme: "dark" },
       }),
     );
   });
@@ -548,7 +575,9 @@ describe("App", () => {
     fireEvent.click(screen.getAllByRole("button", { name: "Import" })[0]);
 
     expect(screen.getByRole("button", { name: "Import" })).toHaveAttribute("aria-current", "page");
-    expect(screen.getByRole("heading", { name: "Import" })).toBeInTheDocument();
+    const workspaceHeader = document.querySelector<HTMLElement>(".workspace-header");
+    expect(workspaceHeader).not.toBeNull();
+    expect(within(workspaceHeader!).getByRole("heading", { name: "Import" })).toBeInTheDocument();
   });
 
   it("keeps context and status surfaces visible while navigation changes", async () => {

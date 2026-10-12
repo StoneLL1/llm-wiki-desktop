@@ -35,6 +35,7 @@ export function useModalDialog<T extends HTMLElement = HTMLDivElement>({
       : null;
     const focusable = () => dialog
       ? Array.from(dialog.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR))
+        .filter((element) => !element.closest("[hidden], [inert]"))
       : [];
 
     const prevOverflow = document.body.style.overflow;
@@ -53,6 +54,8 @@ export function useModalDialog<T extends HTMLElement = HTMLDivElement>({
         return;
       }
       if (event.key !== "Tab") return;
+      const modals = document.querySelectorAll("[aria-modal='true']");
+      if (modals.length > 0 && modals[modals.length - 1] !== dialog) return;
 
       const elements = focusable();
       if (elements.length === 0) {

@@ -1,4 +1,8 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const invokeMock = vi.hoisted(() => vi.fn());
+
+vi.mock("@tauri-apps/api/core", async (importOriginal) => ({ ...await importOriginal<typeof import("@tauri-apps/api/core")>(), invoke: invokeMock }));
 
 const permissionMock = vi.hoisted(() => vi.fn());
 const sendNotificationMock = vi.hoisted(() => vi.fn());
@@ -20,9 +24,10 @@ import { useSettingsStore } from "../stores/settingsStore";
 import { defaultProject, useProjectStore } from "../stores/projectStore";
 import type { WorkflowRun, WorkflowRunSummary } from "../types/workflow";
 import type { BackendEvent } from "../types/task";
-import { handleNotificationAction, invalidateNotificationPermissionEpoch, notifyTaskEvent } from "./notifications";
+import { handleNotificationAction, invalidateNotificationPermissionEpoch, notifyTaskEvent, sendTestNotification } from "./notifications";
 
 beforeEach(() => {
+  invokeMock.mockReset().mockResolvedValue(undefined);
   invalidateNotificationPermissionEpoch();
   permissionMock.mockReset().mockResolvedValue(true);
   sendNotificationMock.mockReset();
@@ -251,5 +256,40 @@ describe("accepted Workflow summary notifications", () => {
     recordWorkflowFacts([recovered]);
     await notifyTaskEvent(workflowEvent(recovered));
     expect(sendNotificationMock).toHaveBeenCalledTimes(2);
+  });
+});
+
+
+describe("settings test notification dispatch", () => {
+  beforeEach(() => {
+    Object.defineProperty(window, "__TAURI_INTERNALS__", { value: {}, configurable: true });
+  });
+
+  afterEach(() => { Reflect.deleteProperty(window, "__TAURI_INTERNALS__"); });
+
+  it("does not submit a notification when the service is not authorized", async () => {
+    permissionMock.mockResolvedValue(false);
+    await expect(sendTestNotification()).resolves.toBe(false);
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
+
+  it("waits for the native notification command before reporting submission", async () => {
+    let complete!: () => void;
+    invokeMock.mockReturnValue(new Promise<void>((resolve) => { complete = resolve; }));
+    let settled = false;
+    const sending = sendTestNotification().then((sent) => { settled = true; return sent; });
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith("plugin:notification|notify", {
+      options: { title: "LLM Wiki Desktop", body: expect.any(String) },
+    }));
+    expect(settled).toBe(false);
+    complete();
+    await expect(sending).resolves.toBe(true);
+    expect(sendNotificationMock).not.toHaveBeenCalled();
+  });
+
+  it("propagates native notification failures to the settings panel", async () => {
+    invokeMock.mockRejectedValue(new Error("Native notification service unavailable"));
+    await expect(sendTestNotification()).rejects.toThrow("Native notification service unavailable");
+    expect(sendNotificationMock).not.toHaveBeenCalled();
   });
 });

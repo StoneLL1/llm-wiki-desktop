@@ -38,78 +38,131 @@ impl CompileLegacyAdapter {
         context.app_dir.join("source-index.json").is_file()
     }
 
-    pub fn list(context: &ProjectContext) -> Result<Vec<LegacyCompileSource>, BackendError> {
+    /// Discover identities without reading every Source body. Callers can bind only
+    /// the originals they actually need, so unrelated missing artifacts stay isolated.
+    pub(crate) fn source_paths(
+        context: &ProjectContext,
+    ) -> Result<std::collections::BTreeMap<String, String>, BackendError> {
         let index_path = context.app_dir.join("source-index.json");
+        let mut paths = std::collections::BTreeMap::new();
         if !index_path.is_file() {
-            return Ok(Vec::new());
+            return Ok(paths);
         }
         let index = FileStore.read_json_file::<SourceArtifactIndex>(&index_path)?;
-        let mut seen = HashSet::new();
-        let mut sources = Vec::new();
-        let mut entries: Vec<_> = index.sources.into_iter().collect();
+        let mut entries = index.sources.into_iter().collect::<Vec<_>>();
         entries.sort_by(|left, right| left.0.cmp(&right.0));
-        for (source_key, mut artifacts) in entries {
-            artifacts.sort();
+        for (source_key, artifacts) in entries {
             for project_path in artifacts {
                 let normalized = project_path.replace('\\', "/");
-                if !(normalized.starts_with("raw/extracted/")
+                if (normalized.starts_with("raw/extracted/")
                     || normalized.starts_with("wiki/sources/"))
-                    || !normalized.ends_with(".md")
-                    || !seen.insert(normalized.clone())
+                    && normalized.ends_with(".md")
                 {
-                    continue;
+                    paths
+                        .entry(normalized)
+                        .or_insert_with(|| source_key.clone());
                 }
-                let absolute_path = context.resolve_project_path(&normalized)?;
-                let bytes = std::fs::read(&absolute_path).map_err(|error| {
-                    BackendError::new("COMPILE_INPUT_READ_FAILED", error.to_string(), true, false)
-                })?;
-                if String::from_utf8_lossy(&bytes).trim().is_empty() {
-                    continue;
-                }
-                let content_hash = format!("{:x}", Sha256::digest(&bytes));
-                let source_hash = format!("{:x}", Sha256::digest(source_key.as_bytes()));
-                sources.push(LegacyCompileSource {
-                    reference: SourceVersionRef {
-                        source_id: format!("legacy-{}", &source_hash[..16]),
-                        version_id: format!("legacy-{}", &content_hash[..16]),
-                        content_hash,
-                    },
-                    project_path: normalized,
-                    absolute_path,
-                    already_consumed: false,
-                });
             }
         }
-        let promoted_root = context.wiki_dir.join("sources");
-        for absolute_path in FileStore.list_markdown_files(&promoted_root)? {
-            let project_path = context.to_project_relative(&absolute_path)?;
-            if !seen.insert(project_path.clone()) {
+        for absolute in FileStore.list_markdown_files(&context.wiki_dir.join("sources"))? {
+            let path = context.to_project_relative(&absolute)?;
+            paths.entry(path.clone()).or_insert(path);
+        }
+        Ok(paths)
+    }
+
+    pub fn list(context: &ProjectContext) -> Result<Vec<LegacyCompileSource>, BackendError> {
+        Self::read_sources(context, Self::source_paths(context)?)
+    }
+
+    pub(crate) fn source_at_path(
+        context: &ProjectContext,
+        path: &str,
+    ) -> Result<LegacyCompileSource, BackendError> {
+        let mut paths = Self::source_paths(context)?;
+        let key = paths.remove(path).ok_or_else(legacy_version_changed)?;
+        Self::read_sources(context, [(path.to_string(), key)].into_iter().collect())?
+            .pop()
+            .ok_or_else(legacy_version_changed)
+    }
+
+    fn read_sources(
+        context: &ProjectContext,
+        paths: std::collections::BTreeMap<String, String>,
+    ) -> Result<Vec<LegacyCompileSource>, BackendError> {
+        let consumed_versions = Self::consumed_versions(context)?;
+        let mixed = context.app_dir.join("source-index-v2.json").is_file();
+        let mut v2_paths = HashSet::new();
+        if mixed {
+            use crate::services::import_v2::source_registry::SourceRegistry;
+            let index = SourceRegistry::read_index(context, &FileStore)?;
+            for id in index
+                .by_content_hash
+                .values()
+                .chain(index.by_locator.values())
+                .map(|pointer| &pointer.source_id)
+                .collect::<HashSet<_>>()
+            {
+                if let Ok(manifest) = SourceRegistry::read_manifest(
+                    context,
+                    &FileStore,
+                    &context.layout.source_paths()?.manifest(id)?,
+                ) {
+                    v2_paths.insert(manifest.wiki_path);
+                }
+            }
+        }
+        let mut sources = Vec::new();
+        for (project_path, key) in paths {
+            if v2_paths.contains(&project_path) {
                 continue;
             }
+            let absolute_path = context.resolve_project_path(&project_path)?;
             let bytes = std::fs::read(&absolute_path).map_err(|error| {
                 BackendError::new("COMPILE_INPUT_READ_FAILED", error.to_string(), true, false)
             })?;
-            if String::from_utf8_lossy(&bytes).trim().is_empty() {
+            let content = String::from_utf8_lossy(&bytes);
+            if content.trim().is_empty() {
                 continue;
             }
+            if mixed {
+                // An invalid V2 identity must never be downgraded to a legacy file.
+                let split = crate::utils::markdown_utils::split_frontmatter(&content);
+                if split.frontmatter.as_deref().is_some_and(|raw| {
+                    let is_reserved = |key: &str| {
+                        ["sourceId", "versionId", "contentHash"]
+                            .iter()
+                            .any(|reserved| key.eq_ignore_ascii_case(reserved))
+                    };
+                    match serde_saphyr::from_str::<
+                        std::collections::HashMap<String, serde_json::Value>,
+                    >(raw)
+                    {
+                        Ok(mapping) => mapping.keys().any(|key| is_reserved(key)),
+                        // Malformed modern identities are still modern, never legacy.
+                        Err(_) => raw
+                            .lines()
+                            .filter_map(|line| line.split_once(':'))
+                            .any(|(key, _)| is_reserved(key.trim().trim_matches(['\'', '"']))),
+                    }
+                }) {
+                    continue;
+                }
+            }
             let content_hash = format!("{:x}", Sha256::digest(&bytes));
-            let source_hash = format!("{:x}", Sha256::digest(project_path.as_bytes()));
+            let source_hash = format!("{:x}", Sha256::digest(key.as_bytes()));
+            let reference = SourceVersionRef {
+                source_id: format!("legacy-{}", &source_hash[..16]),
+                version_id: format!("legacy-{}", &content_hash[..16]),
+                content_hash,
+            };
             sources.push(LegacyCompileSource {
-                reference: SourceVersionRef {
-                    source_id: format!("legacy-{}", &source_hash[..16]),
-                    version_id: format!("legacy-{}", &content_hash[..16]),
-                    content_hash,
-                },
+                already_consumed: consumed_versions.contains(&reference),
+                reference,
                 project_path,
                 absolute_path,
-                already_consumed: false,
             });
         }
-        let consumed_versions = Self::consumed_versions(context)?;
-        for source in &mut sources {
-            source.already_consumed = consumed_versions.contains(&source.reference);
-        }
-        sources.sort_by(|left, right| left.project_path.cmp(&right.project_path));
         Ok(sources)
     }
 
@@ -204,20 +257,24 @@ impl CompileLegacyAdapter {
         context: &ProjectContext,
         requested: &[SourceVersionRef],
     ) -> Result<Vec<LegacyCompileSource>, BackendError> {
-        let available = Self::list(context)?;
+        let requested_ids = requested
+            .iter()
+            .map(|source| source.source_id.as_str())
+            .collect::<HashSet<_>>();
+        let paths = Self::source_paths(context)?
+            .into_iter()
+            .filter(|(_, key)| {
+                let hash = format!("{:x}", Sha256::digest(key.as_bytes()));
+                requested_ids.contains(format!("legacy-{}", &hash[..16]).as_str())
+            })
+            .collect();
+        let available = Self::read_sources(context, paths)?;
         let mut resolved = Vec::with_capacity(requested.len());
         for reference in requested {
             let source = available
                 .iter()
                 .find(|source| &source.reference == reference)
-                .ok_or_else(|| {
-                    BackendError::new(
-                        "COMPILE_SOURCE_VERSION_INVALID",
-                        "A selected legacy Source version is missing or has changed.",
-                        true,
-                        true,
-                    )
-                })?;
+                .ok_or_else(legacy_version_changed)?;
             resolved.push(LegacyCompileSource {
                 reference: source.reference.clone(),
                 project_path: source.project_path.clone(),
@@ -229,6 +286,15 @@ impl CompileLegacyAdapter {
     }
 }
 
+fn legacy_version_changed() -> BackendError {
+    BackendError::new(
+        "COMPILE_SOURCE_VERSION_INVALID",
+        "A selected legacy Source version is missing or has changed.",
+        true,
+        true,
+    )
+}
+
 fn compile_consumption_error(message: impl Into<String>) -> BackendError {
     BackendError::new("COMPILE_CONSUMPTION_INVALID", message.into(), true, true)
 }
@@ -238,6 +304,41 @@ mod tests {
     use super::*;
     use crate::models::compile::{CompileConsumptionRecord, CompileRoute};
     use std::fs;
+
+    #[test]
+    fn mixed_projects_never_downgrade_modern_source_identities_to_legacy() {
+        let root = tempfile::tempdir().unwrap();
+        let context = ProjectContext::new("mixed-identity", root.path().to_path_buf());
+        fs::create_dir_all(context.app_dir.clone()).unwrap();
+        fs::create_dir_all(context.wiki_dir.join("sources")).unwrap();
+        fs::write(
+            context.app_dir.join("source-index.json"),
+            r#"{"sources":{}}"#,
+        )
+        .unwrap();
+        fs::write(
+            context.app_dir.join("source-index-v2.json"),
+            r#"{"schemaVersion":3,"byContentHash":{},"byLocator":{}}"#,
+        )
+        .unwrap();
+        let path = "wiki/sources/old.md";
+        for field in ["sourceId", "versionId", "contentHash"] {
+            for value in ["broken", "{ invalid: true }", "[broken"] {
+                fs::write(
+                    context.root.join(path),
+                    format!("---\n{field}: {value}\n---\n# Source"),
+                )
+                .unwrap();
+                assert!(CompileLegacyAdapter::source_at_path(&context, path).is_err());
+            }
+        }
+        fs::write(
+            context.root.join(path),
+            "---\nsource_id: platform-content-id\n---\n# Old Source",
+        )
+        .unwrap();
+        assert!(CompileLegacyAdapter::source_at_path(&context, path).is_ok());
+    }
 
     #[test]
     fn legacy_adapter_is_read_only_and_resolves_only_indexed_markdown() {

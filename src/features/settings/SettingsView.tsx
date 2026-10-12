@@ -1,24 +1,15 @@
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import {
-  Clock,
-  Cpu,
-  Globe,
-  History,
-  RefreshCw,
-  Settings as SettingsIcon,
-  Shield,
-  Sun,
-  Wrench,
-  type LucideIcon,
-} from "lucide-react";
+import { Check, Clock, Cpu, History, Monitor, RefreshCw, RotateCcw, Search, Settings as SettingsIcon, Shield, Sun, Wrench, X, type LucideIcon } from "lucide-react";
 
 import type { AgentInfo } from "../../types/agent";
 import type { LlmProviderConfig, LlmProviderKind, ProviderStatus, ProviderTestResult } from "../../types/llm";
 import type { ProjectSummary } from "../../types/project";
+import type { GlobalPreferencesPatch } from "../../types/settings";
 import type { SettingsSectionKey } from "../../stores/navigationStore";
-import { useSettingsStore } from "../../stores/settingsStore";
+import { defaultSettings, useSettingsStore } from "../../stores/settingsStore";
 import { observeProjectResources } from "../../stores/projectScope";
+import { ActionableErrorNotice } from "../../components/app/ActionableErrorNotice";
 import { AiSettings } from "./AiSettings";
 import { VersionHistorySettings } from "./VersionHistorySettings";
 import { AppearanceSettings } from "./AppearanceSettings";
@@ -27,15 +18,13 @@ import { LanguageSettings } from "./LanguageSettings";
 import { SecuritySettings, type ProviderSecretRow } from "./SecuritySettings";
 import { UpdateSettings } from "./UpdateSettings";
 import { ImportCompatibilitySettings } from "./ImportCompatibilitySettings";
+import { preferenceIsModified, settingsCatalog, type SettingsCatalogEntry } from "./settingsCatalog";
 import type { ImportWorkflow } from "../import/importWorkflow";
-import {
-  invalidateNotificationPermissionEpoch,
-  requestNotificationPermissionFromUser,
-} from "../../services/notifications";
+import { invalidateNotificationPermissionEpoch, requestNotificationPermissionFromUser } from "../../services/notifications";
 
 export interface SettingsViewProps {
   initialSection?: SettingsSectionKey;
-  project: ProjectSummary;
+  project: ProjectSummary | null;
   providers: ProviderStatus[];
   agents: AgentInfo[];
   onRefreshCapabilities: () => Promise<void> | void;
@@ -45,298 +34,166 @@ export interface SettingsViewProps {
   onTestProvider: (config: LlmProviderConfig) => Promise<ProviderTestResult>;
   importWorkflow?: ImportWorkflow;
   onManageProjectAuthority?: () => void;
+  onDirtyChange?: (dirty: boolean) => void;
 }
 
-interface SettingsNavItem {
-  key: SettingsSectionKey;
-  labelKey: string;
-  icon: LucideIcon;
-}
-
-interface SettingsNavGroup {
-  labelKey: string;
-  items: SettingsNavItem[];
-}
-
-// Settings IA mirrors UI-Frontend-design/settings.html: three labelled groups
-// (Application / AI / System) instead of a flat 8-item list.
-const NAV_GROUPS: SettingsNavGroup[] = [
-  {
-    labelKey: "settings.nav.group.app",
-    items: [
-      { key: "general", labelKey: "settings.nav.general", icon: SettingsIcon },
-      { key: "versions", labelKey: "versions.title", icon: History },
-      { key: "appearance", labelKey: "settings.nav.appearance", icon: Sun },
-      { key: "language", labelKey: "settings.nav.language", icon: Globe },
-    ],
-  },
-  {
-    labelKey: "settings.nav.group.ai",
-    items: [
-      { key: "ai", labelKey: "settings.nav.ai", icon: Cpu },
-    ],
-  },
-  {
-    labelKey: "settings.nav.group.system",
-    items: [
-      { key: "security", labelKey: "settings.nav.security", icon: Shield },
-      { key: "compatibility", labelKey: "settings.nav.compatibility", icon: Wrench },
-      { key: "background", labelKey: "settings.nav.background", icon: Clock },
-      { key: "updates", labelKey: "settings.nav.updates", icon: RefreshCw },
-    ],
-  },
+const NAV_GROUPS: Array<{ scope: "app" | "project"; items: Array<{ key: SettingsSectionKey; label: string; icon: LucideIcon }> }> = [
+  { scope: "app", items: [
+    { key: "general", label: "settings.nav.general", icon: SettingsIcon },
+    { key: "appearance", label: "settings.nav.appearance", icon: Sun },
+    { key: "background", label: "settings.nav.background", icon: Clock },
+    { key: "updates", label: "settings.nav.updates", icon: RefreshCw },
+  ] },
+  { scope: "project", items: [
+    { key: "ai", label: "settings.nav.ai", icon: Cpu },
+    { key: "versions", label: "versions.title", icon: History },
+    { key: "security", label: "settings.nav.security", icon: Shield },
+    { key: "compatibility", label: "settings.nav.compatibility", icon: Wrench },
+  ] },
 ];
-
-const navGroupId = (labelKey: string): string => `settings-nav-group-${labelKey.replace(/\./g, "-")}`;
-
 const providerKinds: readonly LlmProviderKind[] = ["open_ai", "anthropic", "google", "ollama", "custom"];
 
-export function SettingsView({
-  initialSection = "general",
-  project,
-  providers,
-  agents,
-  onRefreshCapabilities,
-  onSaveProvider,
-  onSaveSecret,
-  onDeleteSecret,
-  onTestProvider,
-  importWorkflow,
-  onManageProjectAuthority,
-}: SettingsViewProps) {
+export function SettingsView({ initialSection = "general", project, providers, agents, onRefreshCapabilities, onSaveProvider, onSaveSecret, onDeleteSecret, onTestProvider, importWorkflow, onManageProjectAuthority, onDirtyChange }: SettingsViewProps) {
   const { t } = useTranslation();
-  const [activeSection, setActiveSection] = useState<SettingsSectionKey>(initialSection);
+  const [activeSection, setActiveSection] = useState<SettingsSectionKey>(initialSection === "language" ? "general" : initialSection);
+  const [aiVisited, setAiVisited] = useState(initialSection === "ai");
+  const [query, setQuery] = useState("");
+  const [modifiedOnly, setModifiedOnly] = useState(false);
+  const [focusTarget, setFocusTarget] = useState<string | null>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
   const settings = useSettingsStore((state) => state.settings);
   const loading = useSettingsStore((state) => state.loading);
   const saving = useSettingsStore((state) => state.saving);
   const error = useSettingsStore((state) => state.error);
+  const globalLoading = useSettingsStore((state) => state.globalLoading);
+  const globalSaving = useSettingsStore((state) => state.globalSaving);
+  const globalError = useSettingsStore((state) => state.globalError);
   const chatConvenienceAuthorization = useSettingsStore((state) => state.chatConvenienceAuthorization);
   const loadSettings = useSettingsStore((state) => state.loadSettings);
+  const loadGlobalSettings = useSettingsStore((state) => state.loadGlobalSettings);
   const ensureChatConvenienceAuthorization = useSettingsStore((state) => state.ensureChatConvenienceAuthorization);
   const setChatConvenienceAuthorization = useSettingsStore((state) => state.setChatConvenienceAuthorization);
-  const revokeAllChatConvenienceAuthorizations = useSettingsStore(
-    (state) => state.revokeAllChatConvenienceAuthorizations,
-  );
+  const revokeAllChatConvenienceAuthorizations = useSettingsStore((state) => state.revokeAllChatConvenienceAuthorizations);
   const persistPatch = useSettingsStore((state) => state.persistPatch);
-  const notificationProjectKey = `${project.projectId}\0${project.rootPath}`;
-  const notificationSaveTailRef = useRef<Promise<unknown>>(Promise.resolve());
-  const notificationScopeRef = useRef({ key: notificationProjectKey, generation: 0 });
-  if (notificationScopeRef.current.key !== notificationProjectKey) {
-    notificationScopeRef.current = {
-      key: notificationProjectKey,
-      generation: notificationScopeRef.current.generation + 1,
-    };
-    notificationSaveTailRef.current = Promise.resolve();
-  }
+  const persistGlobalPatch = useSettingsStore((state) => state.persistGlobalPatch);
+  const projectId = project?.projectId;
+  const rootPath = project?.rootPath;
+  const projectScope = NAV_GROUPS[1].items.some((item) => item.key === activeSection);
+  const searching = Boolean(query.trim()) || modifiedOnly;
 
   useEffect(() => {
-    const unobserve = observeProjectResources(
-      { projectId: project.projectId, rootPath: project.rootPath },
-      ["settings-chat-authorization"],
-    );
-    void loadSettings(project.projectId, project.rootPath);
-    void ensureChatConvenienceAuthorization(project.projectId, project.rootPath);
+    void loadGlobalSettings();
+    if (!projectId || !rootPath) return;
+    const unobserve = observeProjectResources({ projectId, rootPath }, ["settings-chat-authorization"]);
+    void loadSettings(projectId, rootPath);
+    void ensureChatConvenienceAuthorization(projectId, rootPath);
     return unobserve;
-  }, [project.projectId, project.rootPath, loadSettings, ensureChatConvenienceAuthorization]);
+  }, [projectId, rootPath, loadSettings, loadGlobalSettings, ensureChatConvenienceAuthorization]);
 
-  const savePatch = async (patch: Partial<typeof settings>, refreshCapabilities = false) => {
-    await persistPatch(project.projectId, project.rootPath, patch);
-    if (refreshCapabilities) {
-      await onRefreshCapabilities();
+  useEffect(() => {
+    if (!focusTarget || searching) return;
+    const element = contentRef.current?.querySelector<HTMLElement>(`#${focusTarget}`);
+    if (element) {
+      if (focusTarget === `settings-${activeSection}`) {
+        if (contentRef.current) contentRef.current.scrollTop = 0;
+      } else element.scrollIntoView?.({ block: "nearest" });
+      element.focus({ preventScroll: true });
+    }
+    setFocusTarget(null);
+  }, [focusTarget, searching, activeSection]);
+
+  const saveGlobal = (patch: GlobalPreferencesPatch) => persistGlobalPatch(patch).catch(() => undefined);
+  const saveProject = async (patch: Parameters<typeof persistPatch>[2]) => {
+    if (!projectId || !rootPath) return;
+    await persistPatch(projectId, rootPath, patch);
+  };
+  const selectSection = (section: SettingsSectionKey, target?: string) => {
+    if (section === "ai") setAiVisited(true);
+    setActiveSection(section);
+    setQuery("");
+    setModifiedOnly(false);
+    setFocusTarget(target ?? `settings-${section}`);
+    if (contentRef.current) contentRef.current.scrollTop = 0;
+  };
+  const requestPermission = async () => {
+    invalidateNotificationPermissionEpoch();
+    return requestNotificationPermissionFromUser();
+  };
+  const resetPreference = (entry: SettingsCatalogEntry) => {
+    if (!entry.preference) return;
+    if (entry.preference === "aiDefaultRoute") {
+      void saveProject({ aiDefaultRoute: null, agentDefault: null }).catch(() => undefined);
+    } else {
+      void saveGlobal({ [entry.preference]: defaultSettings[entry.preference] });
     }
   };
-
-  const requestNotificationPermission = async () => {
-    invalidateNotificationPermissionEpoch();
-    await requestNotificationPermissionFromUser();
-  };
-
-  const providerStatuses = providers;
-  const securityRows: ProviderSecretRow[] = providerKinds.map((provider) => {
-    const configured = providerStatuses.find((item) => item.config.provider === provider);
-    const secretMask = configured?.secretMask ?? null;
-    return {
-      provider,
-      hasSecret: Boolean(secretMask) || Boolean(configured?.hasSecret),
-    };
+  const terms = query.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
+  const results = settingsCatalog.filter((entry) => {
+    if (modifiedOnly && !preferenceIsModified(entry, settings, defaultSettings)) return false;
+    const text = `${t(entry.label)} ${t(entry.description)} ${entry.keywords}`.toLocaleLowerCase();
+    return terms.every((term) => text.includes(term));
   });
+  const securityRows: ProviderSecretRow[] = providerKinds.filter((provider) => provider !== "ollama").map((provider) => ({
+    provider, hasSecret: Boolean(providers.find((item) => item.config.provider === provider)?.hasSecret),
+  }));
 
   return (
     <div className="settings-view-layout">
       <aside className="settings-view__nav" aria-label={t("settings.nav.label")}>
         <div className="settings-view__nav-head">
-          <div className="settings-view__nav-label">{t("settings.nav.label")}</div>
-          <div className="settings-view__nav-project" title={project.rootPath}>{project.name}</div>
+          <div className="settings-search-box">
+            <Search size={14} aria-hidden="true" />
+            <input type="search" aria-label={t("settings.search.label")} placeholder={t("settings.search.placeholder")} value={query} onChange={(event) => setQuery(event.target.value)} />
+            {query ? <button type="button" className="icon-button" aria-label={t("settings.search.clear")} onClick={() => setQuery("")}><X size={12} aria-hidden="true" /></button> : null}
+          </div>
+          <button type="button" className="settings-modified-filter" aria-pressed={modifiedOnly} onClick={() => setModifiedOnly((value) => !value)}><Check size={12} aria-hidden="true" />{t("settings.search.modified")}</button>
         </div>
         <nav className="settings-view__nav-body">
-          {NAV_GROUPS.map((group) => (
-            <div className="settings-view__nav-group" key={group.labelKey} role="group" aria-labelledby={navGroupId(group.labelKey)}>
-              <div id={navGroupId(group.labelKey)} className="settings-view__nav-group-label">{t(group.labelKey)}</div>
-              {group.items.map((item) => {
-                const Icon = item.icon;
-                const active = activeSection === item.key;
-                return (
-                  <button
-                    key={item.key}
-                    type="button"
-                    aria-current={active ? "true" : undefined}
-                    className={`settings-view__nav-item${active ? " is-active" : ""}`}
-                    onClick={() => setActiveSection(item.key)}
-                  >
-                    <Icon aria-hidden="true" className="settings-view__nav-icon" size={14} />
-                    <span className="truncate">{t(item.labelKey)}</span>
-                  </button>
-                );
-              })}
-            </div>
-          ))}
+          {NAV_GROUPS.map((group) => <div className="settings-view__nav-group" key={group.scope} role="group" aria-labelledby={`settings-group-${group.scope}`}>
+            <div id={`settings-group-${group.scope}`} className="settings-view__nav-group-label">{t(`settings.scope.${group.scope}`)}</div>
+            {group.scope === "project" ? <div className="settings-view__nav-project" title={project?.rootPath}>{project?.name ?? t("settings.scope.noProject")}</div> : null}
+            {group.items.map(({ key, label, icon: Icon }) => <button key={key} type="button" aria-current={!searching && activeSection === key ? "page" : undefined} className={`settings-view__nav-item${!searching && activeSection === key ? " is-active" : ""}`} onClick={() => selectSection(key)}><Icon aria-hidden="true" size={15} /><span>{t(label)}</span></button>)}
+          </div>)}
         </nav>
+        <div className="settings-nav-foot"><Monitor size={13} aria-hidden="true" />{t("settings.scope.local")}</div>
       </aside>
-
-      <div className="settings-view__content">
-        <div className="settings-view__content-inner">
-          {loading || saving ? (
-            <div className="settings-view__status" role="status">
-              {loading ? <span>{t("settings.state.loading")}</span> : null}
-              {saving ? <span>{t("settings.state.saving")}</span> : null}
-            </div>
-          ) : null}
-
-          {error ? (
-            <div className="settings-view__error flex items-center justify-between gap-3" role="alert">
-              <span>{error}</span>
-              <button
-                type="button"
-                className="btn btn--secondary btn--sm"
-                onClick={() => {
-                  void loadSettings(project.projectId, project.rootPath);
-                  void ensureChatConvenienceAuthorization(project.projectId, project.rootPath);
-                }}
-              >
-                {t("workflows.action.retry")}
-              </button>
-            </div>
-          ) : null}
-
-          {activeSection === "general" ? (
-            <section className="settings-view__section">
-              <div>
-                <h2 className="settings-view__section-title">{t("settings.general.title")}</h2>
-                <p className="settings-view__section-desc">{t("settings.general.description")}</p>
-              </div>
-              <div className="settings-view__cards">
-                <div className="settings-view__card">
-                  <div className="settings-view__card-label">{t("settings.general.projectRoot")}</div>
-                  <div className="settings-view__card-value settings-view__card-value--mono">{project.rootPath}</div>
-                </div>
-                <div className="settings-view__card">
-                  <div className="settings-view__card-label">{t("settings.general.scope")}</div>
-                  <div className="settings-view__card-value">{t("settings.general.scopeCopy")}</div>
-                </div>
-                {onManageProjectAuthority ? (
-                  <div className="settings-view__card">
-                    <div className="settings-view__card-label">{t("settings.general.projectAuthority")}</div>
-                    <div className="settings-view__card-value">{t("settings.general.projectAuthorityDescription")}</div>
-                    <button className="btn btn--secondary mt-3" onClick={onManageProjectAuthority} type="button">
-                      {t("settings.general.manageProjectAuthority")}
-                    </button>
-                  </div>
-                ) : null}
-              </div>
-            </section>
-          ) : null}
-
-          {activeSection === "versions" ? <VersionHistorySettings key={`${project.projectId}\0${project.rootPath}`} project={project} /> : null}
-
-          {activeSection === "appearance" ? (
-            <AppearanceSettings
-              theme={settings.theme}
-              colorThemePreset={settings.colorThemePreset}
-              onChange={(theme) => void savePatch({ theme })}
-              onChangeColorThemePreset={(colorThemePreset) => void savePatch({ colorThemePreset })}
-            />
-          ) : null}
-
-          {activeSection === "language" ? (
-            <LanguageSettings language={settings.language} onChange={(language) => void savePatch({ language })} />
-          ) : null}
-
-          {activeSection === "ai" ? (
-            <AiSettings
-              agents={agents}
-              providers={providerStatuses}
-              agentDefault={settings.agentDefault}
-              contextWindow={settings.contextWindow}
-              onRefreshAgents={() => { void onRefreshCapabilities(); }}
-              onChangeDefault={(agentDefault) => { void savePatch({ agentDefault }, true); }}
-              onSaveProvider={(config) => onSaveProvider({ ...config, contextWindow: settings.contextWindow })}
-              onSaveSecret={async (provider, secret) => {
-                await onSaveSecret(provider, secret);
-              }}
-              onDeleteSecret={async (provider) => {
-                await onDeleteSecret(provider);
-              }}
-              onTestProvider={(config) => onTestProvider({ ...config, contextWindow: settings.contextWindow })}
-            />
-          ) : null}
-
-          {activeSection === "security" ? (
-            <SecuritySettings
-              providers={securityRows}
-              chatConvenienceAuthorization={chatConvenienceAuthorization}
-              onDeleteSecret={(provider) => {
-                void (async () => {
-                  await onDeleteSecret(provider);
-                })();
-              }}
-              onRevokeChatConvenience={() => {
-                void setChatConvenienceAuthorization(project.projectId, project.rootPath, false);
-              }}
-              onRevokeAllChatConvenience={() => {
-                void revokeAllChatConvenienceAuthorizations();
-              }}
-            />
-          ) : null}
-
-          {activeSection === "compatibility" ? (
-            <ImportCompatibilitySettings workflow={importWorkflow ?? null} />
-          ) : null}
-
-          {activeSection === "background" ? (
-            <BackgroundTaskSettings
-              closeBehavior={settings.closeBehavior}
-              contextWindow={settings.contextWindow}
-              systemNotifications={settings.systemNotifications}
-              onChangeCloseBehavior={(closeBehavior) => { void savePatch({ closeBehavior }); }}
-              onChangeContextWindow={(contextWindow) => { void savePatch({ contextWindow }); }}
-              onChangeSystemNotification={(key, enabled) => {
-                const owner = { ...notificationScopeRef.current };
-                const save = notificationSaveTailRef.current.then(async () => {
-                  if (
-                    notificationScopeRef.current.key !== owner.key
-                    || notificationScopeRef.current.generation !== owner.generation
-                  ) return false;
-                  const latest = useSettingsStore.getState().settings.systemNotifications;
-                  await savePatch({
-                    systemNotifications: { ...latest, [key]: enabled },
-                  });
-                  return notificationScopeRef.current.key === owner.key
-                    && notificationScopeRef.current.generation === owner.generation;
-                });
-                notificationSaveTailRef.current = save.catch(() => undefined);
-                if (enabled) void save.then((saved) => {
-                  if (saved) return requestNotificationPermission();
-                  return undefined;
-                }, () => undefined);
-              }}
-              onRequestNotificationPermission={() => { void requestNotificationPermission(); }}
-            />
-          ) : null}
-
-          {activeSection === "updates" ? (
-            <UpdateSettings />
-          ) : null}
+      <div className="settings-content-column">
+        <div className="settings-view__content" ref={contentRef}>
+          <div className="settings-view__content-inner">
+            <div className="settings-scope-label">{searching ? t("settings.search.results") : projectScope ? t("settings.scope.projectNamed", { name: project?.name ?? t("settings.scope.noProject") }) : t("settings.scope.allProjects")}</div>
+            {globalError ? <ActionableErrorNotice error={globalError} onAction={async () => { await loadGlobalSettings(); }} /> : null}
+            {projectScope && error ? <ActionableErrorNotice error={error} onAction={async () => { if (projectId && rootPath) await loadSettings(projectId, rootPath); }} /> : null}
+            {searching ? <section className="settings-search-results" aria-label={t("settings.search.results")}>
+              <h2 className="settings-view__section-title">{t("settings.search.resultCount", { count: results.length })}</h2>
+              {results.length === 0 ? <p className="settings-empty-copy">{t("settings.search.empty")}</p> : results.map((entry) => <div className="settings-search-result" key={entry.id}>
+                <button type="button" className="settings-search-result__open" onClick={() => selectSection(entry.section, entry.id)}><strong>{t(entry.label)}</strong><span>{t(entry.description)}</span><small>{t(`settings.scope.${entry.scope}`)}{preferenceIsModified(entry, settings, defaultSettings) ? ` · ${t("settings.search.changed")}` : ""}</small></button>
+                {entry.preference && preferenceIsModified(entry, settings, defaultSettings) && (entry.scope === "app" || project) ? <button type="button" className="icon-button" aria-label={t("settings.reset.named", { name: t(entry.label) })} title={t("settings.reset.named", { name: t(entry.label) })} onClick={() => resetPreference(entry)}><RotateCcw size={14} aria-hidden="true" /></button> : null}
+              </div>)}
+            </section> : null}
+            {!searching && projectScope && !project ? <div className="settings-project-empty"><Cpu size={24} aria-hidden="true" /><h2 className="settings-view__section-title">{t("settings.scope.openProjectTitle")}</h2><p>{t("settings.scope.openProjectHelp")}</p></div> : null}
+            {!searching && activeSection === "general" ? <section id="settings-general" tabIndex={-1} className="settings-section-panel">
+              <div><h2 className="settings-view__section-title">{t("settings.general.title")}</h2><p className="settings-view__section-desc">{t("settings.general.applicationDescription")}</p></div>
+              <LanguageSettings language={settings.language} onChange={(language) => { void saveGlobal({ language }); }} />
+              <div className="settings-info-row"><div><strong>{t("settings.general.startup")}</strong><p>{t("settings.general.startupHelp")}</p></div></div>
+              {project ? <div className="settings-project-info"><strong>{project.name}</strong><code title={project.rootPath}>{project.rootPath}</code>{onManageProjectAuthority ? <button type="button" className="settings-button settings-button--secondary" onClick={onManageProjectAuthority}>{t("settings.general.manageProjectAuthority")}</button> : null}</div> : null}
+            </section> : null}
+            {!searching && activeSection === "appearance" ? <AppearanceSettings theme={settings.theme} colorThemePreset={settings.colorThemePreset} onChange={(theme) => { void saveGlobal({ theme }); }} onChangeColorThemePreset={(colorThemePreset) => { void saveGlobal({ colorThemePreset }); }} /> : null}
+            {project && aiVisited ? <div id="settings-ai" tabIndex={-1} hidden={searching || activeSection !== "ai"}>
+              <AiSettings key={`${projectId}\0${rootPath}`} agents={agents} providers={providers} agentDefault={settings.agentDefault} aiDefaultRoute={settings.aiDefaultRoute} contextWindow={settings.contextWindow} onDirtyChange={onDirtyChange}
+                onChangeAiDefaultRoute={(aiDefaultRoute) => saveProject({ aiDefaultRoute, agentDefault: aiDefaultRoute?.kind === "agent" ? aiDefaultRoute.agent : null })}
+                onRefreshAgents={() => { void onRefreshCapabilities(); }} onChangeDefault={(agentDefault) => { void saveProject({ agentDefault, aiDefaultRoute: agentDefault ? { kind: "agent", agent: agentDefault } : null }).catch(() => undefined); }}
+                onSaveProvider={onSaveProvider} onSaveSecret={onSaveSecret} onDeleteSecret={onDeleteSecret} onTestProvider={onTestProvider} />
+            </div> : null}
+            {!searching && project && activeSection === "versions" ? <div id="settings-versions" tabIndex={-1}><VersionHistorySettings key={`${projectId}\0${rootPath}`} project={project} /></div> : null}
+            {!searching && project && activeSection === "security" ? <div id="settings-security" tabIndex={-1}><SecuritySettings providers={securityRows} chatConvenienceAuthorization={chatConvenienceAuthorization} onDeleteSecret={onDeleteSecret} onRevokeChatConvenience={() => setChatConvenienceAuthorization(project.projectId, project.rootPath, false)} onRevokeAllChatConvenience={revokeAllChatConvenienceAuthorizations} /></div> : null}
+            {!searching && project && activeSection === "compatibility" ? <div id="settings-compatibility" tabIndex={-1}><ImportCompatibilitySettings workflow={importWorkflow ?? null} /></div> : null}
+            {!searching && activeSection === "background" ? <BackgroundTaskSettings closeBehavior={settings.closeBehavior} systemNotifications={settings.systemNotifications} onChangeCloseBehavior={(closeBehavior) => { void saveGlobal({ closeBehavior }); }}
+              onChangeSystemNotification={(key, enabled) => persistGlobalPatch({ systemNotifications: { [key]: enabled } }).then(() => { if (enabled) return requestPermission(); })}
+              onRequestNotificationPermission={requestPermission} /> : null}
+            {!searching && activeSection === "updates" ? <div id="settings-updates" tabIndex={-1}><UpdateSettings /></div> : null}
+          </div>
         </div>
+        <div className="settings-save-footer" role="status"><span className={`settings-save-dot${globalError ? " is-error" : ""}`} />{globalLoading || loading ? t("settings.state.loading") : globalSaving || saving ? t("settings.state.saving") : globalError ? t("settings.state.saveFailed") : t("settings.state.autoSave")}</div>
       </div>
     </div>
   );

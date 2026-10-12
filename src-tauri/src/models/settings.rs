@@ -7,6 +7,7 @@ use crate::models::import_v2_agent::AgentAssistancePolicy;
 use crate::models::llm::{LlmProviderConfig, LlmProviderKind, ProviderCredentialBinding};
 use crate::models::project::ProjectTemplate;
 use crate::models::update::UpdateInstallReceipt;
+use crate::models::workflow::WorkflowRouteSelection;
 
 fn default_language() -> String {
     "en".into()
@@ -395,6 +396,8 @@ pub struct Settings {
     #[serde(default)]
     pub agent_default: Option<AgentKind>,
     #[serde(default)]
+    pub ai_default_route: Option<WorkflowRouteSelection>,
+    #[serde(default)]
     pub import_agent_policy: AgentAssistancePolicy,
     #[serde(default)]
     pub llm_providers: Vec<LlmProviderConfig>,
@@ -440,6 +443,7 @@ impl Default for Settings {
             manual_edit_protection: default_manual_edit_protection(),
             raw_sources_immutable: default_raw_sources_immutable(),
             agent_default: None,
+            ai_default_route: None,
             import_agent_policy: AgentAssistancePolicy::default(),
             llm_providers: Vec::new(),
             provider_credential_bindings: Vec::new(),
@@ -512,9 +516,8 @@ pub struct GlobalSettingsFile {
     pub remote_provider_disclosure_revision: Option<String>,
 }
 
-/// The no-project workbench may change only the small subset of global UI
-/// preferences that does not require a project context. Secrets, provider
-/// configuration, and project-scoped defaults remain unavailable here.
+/// Legacy two-field preference API, retained for older clients. New settings
+/// surfaces use the partial GlobalPreferencesPatch API.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct GlobalUiPreferences {
@@ -530,6 +533,154 @@ impl Default for GlobalUiPreferences {
         Self {
             language: settings.language,
             theme: settings.theme,
+        }
+    }
+}
+
+/// Application preferences available before opening a knowledge base. Update
+/// policy and authorization receipts have dedicated APIs and are not exposed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GlobalPreferences {
+    pub language: String,
+    pub theme: ThemePreference,
+    pub color_theme_preset: ColorThemePresetId,
+    pub density: DensityPreference,
+    pub ui_font: String,
+    pub reading_font: String,
+    pub code_font: String,
+    pub agent_output_language: AgentOutputLanguage,
+    pub close_behavior: CloseBehavior,
+    pub system_notifications: SystemNotificationPrefs,
+    pub notification_click_behavior: NotificationClickBehavior,
+    pub max_concurrent_tasks: u64,
+    pub startup_behavior: StartupBehavior,
+    pub default_project_location: String,
+    pub external_editor: String,
+    pub associate_md_files: bool,
+    pub associate_wiki_folders: bool,
+}
+
+impl From<&GlobalSettingsFile> for GlobalPreferences {
+    fn from(settings: &GlobalSettingsFile) -> Self {
+        Self {
+            language: settings.language.clone(),
+            theme: settings.theme,
+            color_theme_preset: settings.color_theme_preset,
+            density: settings.density,
+            ui_font: settings.ui_font.clone(),
+            reading_font: settings.reading_font.clone(),
+            code_font: settings.code_font.clone(),
+            agent_output_language: settings.agent_output_language,
+            close_behavior: settings.close_behavior,
+            system_notifications: settings.system_notifications.clone(),
+            notification_click_behavior: settings.notification_click_behavior,
+            max_concurrent_tasks: settings.max_concurrent_tasks,
+            startup_behavior: settings.startup_behavior,
+            default_project_location: settings.default_project_location.clone(),
+            external_editor: settings.external_editor.clone(),
+            associate_md_files: settings.associate_md_files,
+            associate_wiki_folders: settings.associate_wiki_folders,
+        }
+    }
+}
+
+/// Missing fields preserve the durable value. This DTO deliberately cannot
+/// change project settings, update policy, secrets, or consent metadata.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GlobalPreferencesPatch {
+    pub language: Option<String>,
+    pub theme: Option<ThemePreference>,
+    pub color_theme_preset: Option<ColorThemePresetId>,
+    pub density: Option<DensityPreference>,
+    pub ui_font: Option<String>,
+    pub reading_font: Option<String>,
+    pub code_font: Option<String>,
+    pub agent_output_language: Option<AgentOutputLanguage>,
+    pub close_behavior: Option<CloseBehavior>,
+    pub system_notifications: Option<SystemNotificationPrefsPatch>,
+    pub notification_click_behavior: Option<NotificationClickBehavior>,
+    pub max_concurrent_tasks: Option<u64>,
+    pub startup_behavior: Option<StartupBehavior>,
+    pub default_project_location: Option<String>,
+    pub external_editor: Option<String>,
+    pub associate_md_files: Option<bool>,
+    pub associate_wiki_folders: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SystemNotificationPrefsPatch {
+    pub on_task_completed: Option<bool>,
+    pub on_task_failed: Option<bool>,
+    pub on_confirmation_needed: Option<bool>,
+    pub on_long_task_progress: Option<bool>,
+}
+
+impl GlobalPreferencesPatch {
+    pub fn apply(self, settings: &mut GlobalSettingsFile) {
+        if let Some(value) = self.language {
+            settings.language = value;
+        }
+        if let Some(value) = self.theme {
+            settings.theme = value;
+        }
+        if let Some(value) = self.color_theme_preset {
+            settings.color_theme_preset = value;
+        }
+        if let Some(value) = self.density {
+            settings.density = value;
+        }
+        if let Some(value) = self.ui_font {
+            settings.ui_font = value;
+        }
+        if let Some(value) = self.reading_font {
+            settings.reading_font = value;
+        }
+        if let Some(value) = self.code_font {
+            settings.code_font = value;
+        }
+        if let Some(value) = self.agent_output_language {
+            settings.agent_output_language = value;
+        }
+        if let Some(value) = self.close_behavior {
+            settings.close_behavior = value;
+        }
+        if let Some(value) = self.notification_click_behavior {
+            settings.notification_click_behavior = value;
+        }
+        if let Some(value) = self.max_concurrent_tasks {
+            settings.max_concurrent_tasks = value;
+        }
+        if let Some(value) = self.startup_behavior {
+            settings.startup_behavior = value;
+        }
+        if let Some(value) = self.default_project_location {
+            settings.default_project_location = value;
+        }
+        if let Some(value) = self.external_editor {
+            settings.external_editor = value;
+        }
+        if let Some(value) = self.associate_md_files {
+            settings.associate_md_files = value;
+        }
+        if let Some(value) = self.associate_wiki_folders {
+            settings.associate_wiki_folders = value;
+        }
+        if let Some(patch) = self.system_notifications {
+            if let Some(value) = patch.on_task_completed {
+                settings.system_notifications.on_task_completed = value;
+            }
+            if let Some(value) = patch.on_task_failed {
+                settings.system_notifications.on_task_failed = value;
+            }
+            if let Some(value) = patch.on_confirmation_needed {
+                settings.system_notifications.on_confirmation_needed = value;
+            }
+            if let Some(value) = patch.on_long_task_progress {
+                settings.system_notifications.on_long_task_progress = value;
+            }
         }
     }
 }
@@ -598,6 +749,8 @@ pub struct ProjectSettingsFile {
     #[serde(default)]
     pub agent_default: Option<AgentKind>,
     #[serde(default)]
+    pub ai_default_route: Option<WorkflowRouteSelection>,
+    #[serde(default)]
     pub import_agent_policy: AgentAssistancePolicy,
     #[serde(default)]
     pub llm_providers: Vec<LlmProviderConfig>,
@@ -645,6 +798,7 @@ impl Settings {
         self.manual_edit_protection = project.manual_edit_protection;
         self.raw_sources_immutable = project.raw_sources_immutable;
         self.agent_default = project.agent_default;
+        self.ai_default_route = project.ai_default_route;
         self.import_agent_policy = project.import_agent_policy;
         self.llm_providers = project.llm_providers;
         self.provider_credential_bindings = project.provider_credential_bindings;
@@ -698,6 +852,7 @@ impl Settings {
             manual_edit_protection: self.manual_edit_protection,
             raw_sources_immutable: self.raw_sources_immutable,
             agent_default: self.agent_default,
+            ai_default_route: self.ai_default_route.clone(),
             import_agent_policy: self.import_agent_policy.clone(),
             llm_providers: self.llm_providers.clone(),
             provider_credential_bindings: self.provider_credential_bindings.clone(),
@@ -749,6 +904,41 @@ mod tests {
         ColorThemePresetId, Settings, ThemePreference,
     };
     use crate::models::agent::AgentKind;
+
+    #[test]
+    fn default_ai_route_is_backwards_compatible_and_round_trips_in_project_settings() {
+        use crate::models::llm::LlmProviderKind;
+        use crate::models::workflow::WorkflowRouteSelection;
+        let mut settings: Settings = serde_json::from_value(json!({})).unwrap();
+        assert!(settings.ai_default_route.is_none());
+        settings.ai_default_route = Some(WorkflowRouteSelection::Byok {
+            provider: LlmProviderKind::OpenAi,
+        });
+        let project = settings.to_project_file();
+        let value = serde_json::to_value(&project).unwrap();
+        assert_eq!(
+            value["aiDefaultRoute"],
+            json!({"kind": "byok", "provider": "open_ai"})
+        );
+        let mut loaded = Settings::default();
+        loaded.apply_project(serde_json::from_value(value).unwrap());
+        assert_eq!(loaded.ai_default_route, settings.ai_default_route);
+        assert!(serde_json::to_value(settings.to_global_file())
+            .unwrap()
+            .get("aiDefaultRoute")
+            .is_none());
+    }
+
+    #[test]
+    fn global_preference_patch_rejects_private_or_project_fields() {
+        for value in [
+            json!({"chatConvenienceAuthorizations": []}),
+            json!({"autoDownloadUpdates": true}),
+            json!({"aiDefaultRoute": null}),
+        ] {
+            assert!(serde_json::from_value::<super::GlobalPreferencesPatch>(value).is_err());
+        }
+    }
 
     #[test]
     fn settings_serde_uses_camel_case_fields() {

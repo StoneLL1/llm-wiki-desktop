@@ -1,11 +1,63 @@
-use tauri::State;
+use tauri::{AppHandle, Manager, State};
+
+use crate::commands::runtime::run_blocking;
+use crate::services::BlockingWorkClass;
 
 use crate::app_state::AppState;
 use crate::errors::BackendError;
 use crate::models::settings::{
-    ChatConvenienceAuthorization, GlobalUiPreferences, ProviderSecretStatusRequest,
-    SaveSettingsRequest, SetChatConvenienceAuthorizationRequest, Settings, SettingsProjectRequest,
+    ChatConvenienceAuthorization, GlobalPreferences, GlobalPreferencesPatch, GlobalUiPreferences,
+    ProviderSecretStatusRequest, SaveSettingsRequest, SetChatConvenienceAuthorizationRequest,
+    Settings, SettingsProjectRequest,
 };
+
+#[tauri::command]
+pub async fn get_global_preferences(app: AppHandle) -> Result<GlobalPreferences, BackendError> {
+    run_blocking(app, BlockingWorkClass::MetadataIo, move |app| {
+        app.state::<AppState>()
+            .settings_service
+            .read_global_preferences()
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn patch_global_preferences(
+    app: AppHandle,
+    patch: GlobalPreferencesPatch,
+) -> Result<GlobalPreferences, BackendError> {
+    run_blocking(app, BlockingWorkClass::MetadataIo, move |app| {
+        app.state::<AppState>()
+            .settings_service
+            .patch_global_preferences(patch)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn save_project_settings(
+    app: AppHandle,
+    request: SaveSettingsRequest,
+) -> Result<Settings, BackendError> {
+    run_blocking(app, BlockingWorkClass::MetadataIo, move |app| {
+        let state = app.state::<AppState>();
+        state.with_current_project_write_access(
+            &request.project_id,
+            &request.project_root_path,
+            |_permit, context| {
+                let previous = state.settings_service.read_settings(context)?;
+                let settings = state
+                    .settings_service
+                    .save_project_settings(context, &request.settings)?;
+                if agent_probe_settings_changed(&previous, &settings) {
+                    state.agent_service.invalidate_workflow_route_cache();
+                }
+                Ok(settings)
+            },
+        )
+    })
+    .await
+}
 
 #[tauri::command]
 pub fn get_global_ui_preferences(

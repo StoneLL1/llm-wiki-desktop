@@ -1,100 +1,72 @@
+import { invoke } from "@tauri-apps/api/core";
+import { useEffect, useId, useRef, useState } from "react";
+import { Bell, CheckCircle2, ExternalLink, RefreshCw } from "lucide-react";
 import type { CloseBehavior, SystemNotificationPrefs } from "../../types/settings";
 import { useTranslation } from "react-i18next";
+import { ActionableErrorNotice } from "../../components/app/ActionableErrorNotice";
+import { readNotificationPermission, sendTestNotification, type NotificationPermissionState } from "../../services/notifications";
 
 interface BackgroundTaskSettingsProps {
   closeBehavior: CloseBehavior;
-  contextWindow: number;
   systemNotifications: SystemNotificationPrefs;
   onChangeCloseBehavior: (behavior: CloseBehavior) => void;
-  onChangeContextWindow: (contextWindow: number) => void;
-  onChangeSystemNotification: (key: keyof SystemNotificationPrefs, enabled: boolean) => void;
-  onRequestNotificationPermission: () => void;
+  onChangeSystemNotification: (key: keyof SystemNotificationPrefs, enabled: boolean) => Promise<boolean | void>;
+  onRequestNotificationPermission: () => Promise<boolean>;
 }
 
-const contextOptions = [4_000, 8_000, 16_000, 32_000, 64_000, 128_000, 256_000, 1_000_000];
-
-export function BackgroundTaskSettings({
-  closeBehavior,
-  contextWindow,
-  systemNotifications,
-  onChangeCloseBehavior,
-  onChangeContextWindow,
-  onChangeSystemNotification,
-  onRequestNotificationPermission,
-}: BackgroundTaskSettingsProps) {
+export function BackgroundTaskSettings({ closeBehavior, systemNotifications, onChangeCloseBehavior, onChangeSystemNotification, onRequestNotificationPermission }: BackgroundTaskSettingsProps) {
   const { t } = useTranslation();
-
-  return (
-    <section className="settings-section-panel">
-      <div>
-        <h2 className="m-0 text-[16px] font-semibold">{t("settings.background.title")}</h2>
-        <p className="mt-1 text-[12px] text-[var(--text-muted)]">{t("settings.background.description")}</p>
+  const radioName = useId();
+  const mounted = useRef(true);
+  const busyRef = useRef(false);
+  const permissionEpoch = useRef(0);
+  const [permission, setPermission] = useState<NotificationPermissionState>("unknown");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  const [testSent, setTestSent] = useState(false);
+  const readPermission = async (isCurrent: () => boolean) => {
+    const result = await readNotificationPermission();
+    if (isCurrent()) { setPermission(result); setError(null); }
+  };
+  const refreshPermission = async () => {
+    // Returning focus from a system prompt must not race its explicit result.
+    if (busyRef.current) return;
+    const epoch = ++permissionEpoch.current;
+    const isCurrent = () => mounted.current && epoch === permissionEpoch.current;
+    try { await readPermission(isCurrent); }
+    catch (reason) { if (isCurrent()) setError(reason); }
+  };
+  useEffect(() => {
+    mounted.current = true;
+    void refreshPermission();
+    const refresh = () => { void refreshPermission(); };
+    window.addEventListener("focus", refresh);
+    return () => { mounted.current = false; permissionEpoch.current += 1; window.removeEventListener("focus", refresh); };
+  }, []);
+  const run = async (operation: (isCurrent: () => boolean) => Promise<void>) => {
+    if (busyRef.current) return;
+    const epoch = ++permissionEpoch.current;
+    const isCurrent = () => mounted.current && epoch === permissionEpoch.current;
+    busyRef.current = true; setBusy(true); setError(null); setTestSent(false);
+    try { await operation(isCurrent); } catch (reason) { if (isCurrent()) setError(reason); }
+    finally { busyRef.current = false; if (isCurrent()) setBusy(false); }
+  };
+  return <section className="settings-section-panel" id="settings-background" tabIndex={-1}>
+    <div><h2 className="settings-view__section-title">{t("settings.background.title")}</h2><p className="settings-view__section-desc">{t("settings.background.description")}</p></div>
+    <div id="settings-close-behavior" tabIndex={-1}><h3 className="settings-subheading">{t("settings.background.closeBehavior")}</h3><div className="settings-radio-rows" role="radiogroup" aria-label={t("settings.background.closeBehavior")}>
+      {(["minimize_to_tray", "ask", "quit"] as const).map((option) => <label key={option} className={`settings-radio-row${closeBehavior === option ? " is-selected" : ""}`}><input type="radio" name={radioName} checked={closeBehavior === option} onChange={() => onChangeCloseBehavior(option)} /><span><strong>{t(`settings.background.closeOption.${option}`)}</strong><small>{t(`settings.background.closeHelp.${option}`)}</small></span></label>)}
+    </div></div>
+    <div id="settings-notifications" tabIndex={-1} className="settings-notification-section">
+      <div className="settings-section-heading"><h3 className="settings-subheading"><Bell size={14} aria-hidden="true" />{t("settings.background.notifications")}</h3><span className="settings-permission-status" role="status">{permission === "granted" ? <CheckCircle2 size={13} aria-hidden="true" /> : null}{t(`settings.notification.permission.${permission}`)}</span></div>
+      <p className="settings-help">{t("settings.background.notificationsHelp")}</p>
+      <div className="settings-inline-actions">
+        <button type="button" className="settings-button settings-button--secondary" disabled={busy} onClick={() => void run(async (isCurrent) => { const granted = await onRequestNotificationPermission(); if (isCurrent()) setPermission(granted ? "granted" : "denied"); })}><RefreshCw size={12} aria-hidden="true" />{t("settings.background.notificationPermission")}</button>
+        <button type="button" className="settings-button settings-button--secondary" disabled={busy || permission !== "granted"} onClick={() => void run(async (isCurrent) => { const sent = await sendTestNotification(); if (isCurrent()) { setTestSent(sent); if (!sent) setPermission("denied"); } })}>{t("settings.notification.test")}</button>
+        <button type="button" className="settings-button settings-button--secondary" disabled={busy} onClick={() => void run(async () => { await invoke("open_notification_preferences"); })}><ExternalLink size={12} aria-hidden="true" />{t("settings.notification.openSystem")}</button>
       </div>
-
-      <div className="grid gap-3">
-        <div className="text-[12px] font-medium text-[var(--text-secondary)]">{t("settings.background.closeBehavior")}</div>
-        <div className="settings-choice-grid">
-          {(["minimize_to_tray", "quit"] as const).map((option) => {
-            const selected = closeBehavior === option;
-            return (
-              <button
-                key={option}
-                type="button"
-                onClick={() => onChangeCloseBehavior(option)}
-                className={`settings-choice-card${selected ? " is-selected" : ""}`}
-              >
-                <div className="text-[13px] font-medium">{t(`settings.background.closeOption.${option}`)}</div>
-                <div className="mt-1 text-[11px] text-[var(--text-muted)]">{t(`settings.background.closeHelp.${option}`)}</div>
-              </button>
-            );
-          })}
-        </div>
-      </div>
-
-      <div className="grid gap-2">
-        <label className="text-[12px] font-medium text-[var(--text-secondary)]" htmlFor="context-window">
-          {t("settings.background.contextWindow")}
-        </label>
-        <select
-          id="context-window"
-          className="settings-input"
-          value={String(contextWindow)}
-          onChange={(event) => onChangeContextWindow(Number(event.target.value))}
-        >
-          {contextOptions.map((option) => (
-            <option key={option} value={option}>
-              {t("settings.background.contextWindowOption", { count: option.toLocaleString() })}
-            </option>
-          ))}
-        </select>
-      </div>
-
-      <div className="grid gap-2">
-        <div className="flex items-center justify-between gap-3">
-          <div>
-            <div className="text-[12px] font-medium text-[var(--text-secondary)]">{t("settings.background.notifications")}</div>
-            <div className="mt-1 text-[11px] text-[var(--text-muted)]">{t("settings.background.notificationsHelp")}</div>
-          </div>
-          <button className="btn btn--secondary" type="button" onClick={onRequestNotificationPermission}>
-            {t("settings.background.notificationPermission")}
-          </button>
-        </div>
-        {([
-          ["onTaskCompleted", "settings.background.notifyCompleted"],
-          ["onTaskFailed", "settings.background.notifyFailed"],
-          ["onConfirmationNeeded", "settings.background.notifyConfirmation"],
-        ] as const).map(([key, label]) => (
-          <label className="flex items-center justify-between gap-3 text-[12px]" key={key}>
-            <span>{t(label)}</span>
-            <input
-              aria-label={t(label)}
-              checked={systemNotifications[key]}
-              onChange={(event) => onChangeSystemNotification(key, event.target.checked)}
-              type="checkbox"
-            />
-          </label>
-        ))}
-      </div>
-    </section>
-  );
+      {error ? <ActionableErrorNotice error={error} onAction={() => run(readPermission)} /> : null}
+      {testSent ? <p className="settings-inline-status" role="status">{t("settings.notification.testSent")}</p> : null}
+      {([ ["onTaskCompleted", "settings.background.notifyCompleted"], ["onTaskFailed", "settings.background.notifyFailed"], ["onConfirmationNeeded", "settings.background.notifyConfirmation"] ] as const).map(([key, label]) => <label className="settings-toggle-row" key={key}><span>{t(label)}</span><input type="checkbox" aria-label={t(label)} checked={systemNotifications[key]} disabled={busy} onChange={(event) => { const enabled = event.target.checked; void run(async (isCurrent) => { const granted = await onChangeSystemNotification(key, enabled); if (isCurrent() && typeof granted === "boolean") setPermission(granted ? "granted" : "denied"); }); }} /></label>)}
+    </div>
+  </section>;
 }

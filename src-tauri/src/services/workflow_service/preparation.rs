@@ -322,6 +322,7 @@ impl RequestEvaluationSnapshot {
         let agent_before = AGENT_NANOS.get();
         let route_catalog = if local_only {
             RouteCatalog {
+                default_route: None,
                 default_agent: None,
                 agents: HashMap::new(),
                 providers: Vec::new(),
@@ -435,6 +436,7 @@ impl WorkflowPreparationService {
                     route_selection: input
                         .route_selection
                         .clone()
+                        .or_else(|| evaluation.route_catalog.default_route.clone())
                         .or_else(|| route_selection(&entry.route)),
                 }
             })
@@ -986,6 +988,7 @@ fn build_snapshot_from_evaluation(
 }
 
 struct RouteCatalog {
+    default_route: Option<WorkflowRouteSelection>,
     default_agent: Option<AgentKind>,
     agents: HashMap<AgentKind, AgentRouteCandidate>,
     providers: Vec<ProviderRouteCandidate>,
@@ -1052,8 +1055,10 @@ impl RouteCatalog {
             .settings_service
             .read_settings(environment.context)?;
         let default_agent = settings.agent_default;
+        let default_route = settings.ai_default_route.clone();
+        let selected = selected.or(default_route.as_ref());
         let settings_revision = hex_sha256(
-            canonical_json(&default_agent)
+            canonical_json(&(default_agent, &default_route))
                 .map_err(serialization_error)?
                 .as_bytes(),
         );
@@ -1205,6 +1210,7 @@ impl RouteCatalog {
         }
         providers.sort_by_key(|candidate| provider_order(candidate.config.provider));
         Ok(Self {
+            default_route,
             default_agent,
             agents,
             providers,
@@ -1430,7 +1436,7 @@ fn resolve_external_route(
     agent_policy: AgentRoutePolicy,
     require_explicit_provider: bool,
 ) -> RouteResolution {
-    match selection {
+    match selection.or(catalog.default_route.as_ref()) {
         Some(WorkflowRouteSelection::Agent { agent }) => {
             let route = catalog
                 .agents
@@ -2290,6 +2296,172 @@ mod batch_zero_cost_tests {
     use crate::tasks::TaskService;
     use std::collections::{HashSet, VecDeque};
     use std::sync::{mpsc, Arc, Mutex};
+
+    #[test]
+    fn ai_default_route_applies_to_all_external_workflows_without_fallback() {
+        let mut catalog = RouteCatalog {
+            default_route: Some(WorkflowRouteSelection::Byok {
+                provider: LlmProviderKind::Ollama,
+            }),
+            default_agent: Some(AgentKind::Codex),
+            agents: HashMap::from([(
+                AgentKind::Codex,
+                AgentRouteCandidate {
+                    available: true,
+                    revision: "agent-v1".into(),
+                    lint_available: true,
+                    lint_revision: Some("lint-v1".into()),
+                },
+            )]),
+            providers: vec![ProviderRouteCandidate {
+                config: LlmProviderConfig {
+                    provider: LlmProviderKind::Ollama,
+                    model: "local-model".into(),
+                    base_url: "http://localhost:11434".into(),
+                    context_window: 32_000,
+                    enabled: true,
+                },
+                available: true,
+                revision: "provider-v1".into(),
+            }],
+        };
+        let scopes = [
+            WorkflowScope::UpdateWiki {
+                mode: UpdateWikiMode::ChangedSources,
+                source_versions: vec![],
+            },
+            WorkflowScope::GenerateContent {
+                artifact_type: WorkflowArtifactType::ProjectReport,
+                page_paths: vec![],
+                output_path: None,
+            },
+            WorkflowScope::HealthCheck {
+                mode: HealthCheckMode::Complete,
+            },
+        ];
+        for scope in &scopes {
+            assert!(matches!(
+                resolve_route(scope, None, &catalog).route,
+                Some(WorkflowRoute::Byok {
+                    provider: LlmProviderKind::Ollama,
+                    ..
+                })
+            ));
+            let explicit = WorkflowRouteSelection::Agent {
+                agent: AgentKind::Codex,
+            };
+            assert!(matches!(
+                resolve_route(scope, Some(&explicit), &catalog).route,
+                Some(WorkflowRoute::Agent {
+                    agent: AgentKind::Codex,
+                    ..
+                })
+            ));
+        }
+        catalog.providers[0].available = false;
+        for scope in &scopes {
+            let resolved = resolve_route(scope, None, &catalog);
+            assert!(resolved.route.is_none());
+            assert_eq!(
+                resolved.prerequisite_action,
+                Some(WorkflowPrerequisiteAction::ConfigureExecutionRoute)
+            );
+        }
+        assert!(matches!(
+            resolve_route(
+                &WorkflowScope::HealthCheck {
+                    mode: HealthCheckMode::LocalQuick
+                },
+                None,
+                &catalog
+            )
+            .route,
+            Some(WorkflowRoute::Local { .. })
+        ));
+    }
+
+    #[test]
+    fn ai_default_provider_limits_preparation_probes_to_the_chosen_route() {
+        let root = tempfile::tempdir().unwrap();
+        let context = ProjectContext::new("default-provider", root.path().to_path_buf());
+        let config = tempfile::tempdir().unwrap();
+        let settings = SettingsService::with_config_dir(config.path().to_path_buf());
+        let mut project_settings = crate::models::settings::Settings {
+            ai_default_route: Some(WorkflowRouteSelection::Byok {
+                provider: LlmProviderKind::Ollama,
+            }),
+            llm_providers: vec![LlmProviderConfig {
+                provider: LlmProviderKind::Ollama,
+                model: "local-model".into(),
+                base_url: "http://localhost:11434".into(),
+                context_window: 32_000,
+                enabled: true,
+            }],
+            ..Default::default()
+        };
+        let config_id = uuid::Uuid::new_v4().to_string();
+        project_settings
+            .provider_credential_bindings
+            .push(ProviderCredentialBinding {
+                credential_account_id: SecretService::provider_binding_account_id(
+                    &context,
+                    LlmProviderKind::Ollama,
+                    &config_id,
+                    "http://localhost:11434",
+                    1,
+                )
+                .unwrap(),
+                config_id,
+                provider_kind: LlmProviderKind::Ollama,
+                canonical_origin: "http://localhost:11434".into(),
+                approved_at: None,
+                revision: 1,
+            });
+        FileStore
+            .write_json_atomic(
+                &context,
+                ".app/settings.json",
+                &project_settings.to_project_file(),
+            )
+            .unwrap();
+        let secrets = SecretService::memory();
+        let agents = AgentService::with_runner(Arc::new(DeterministicMissingProcessRunner));
+        let environment = WorkflowPreparationEnvironment {
+            context: &context,
+            access: WorkflowAccessSnapshot {
+                trust: WorkflowProjectTrust::Trusted,
+                trust_kind: None,
+                filesystem_access: WorkflowFilesystemAccess::Writable,
+                persistence: WorkflowPersistenceMode::MemoryOnly,
+                git_state: WorkflowGitState::Unavailable,
+                authority_revision: "test".into(),
+            },
+            settings_service: &settings,
+            secret_service: &secrets,
+            agent_service: &agents,
+        };
+        let access = WorkflowProjectAccessSummary {
+            project_id: context.project_id.clone(),
+            canonical_identity_key: "test".into(),
+            identity_revision: "test".into(),
+            trust: WorkflowProjectTrust::Trusted,
+            filesystem_access: WorkflowFilesystemAccess::Writable,
+            persistence: WorkflowPersistenceMode::MemoryOnly,
+            git_state: WorkflowGitState::Unavailable,
+        };
+        reset_preparation_costs();
+        let catalog = RouteCatalog::load(&environment, &access, None).unwrap();
+        assert_eq!(preparation_costs().agent_probes, 0);
+        assert!(catalog.agents.is_empty());
+        assert_eq!(catalog.providers.len(), 1);
+        assert!(catalog.providers[0].available);
+        let chosen_agent = WorkflowRouteSelection::Agent {
+            agent: AgentKind::Codex,
+        };
+        let explicit = RouteCatalog::load(&environment, &access, Some(&chosen_agent)).unwrap();
+        assert_eq!(explicit.agents.len(), 1);
+        assert!(explicit.providers.is_empty());
+    }
 
     #[test]
     fn generate_preparation_and_execution_baseline_ignore_unrelated_source_registry() {

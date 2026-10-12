@@ -91,6 +91,7 @@ export function ChatView() {
   const resolveConvenienceEdit = useChatStore((state) => state.resolveConvenienceEdit);
   const rollbackLastConvenienceEdit = useChatStore((state) => state.rollbackLastConvenienceEdit);
   const chatConvenienceAuthorization = useSettingsStore((state) => state.chatConvenienceAuthorization);
+  const aiDefaultRoute = useSettingsStore((state) => state.settings.aiDefaultRoute);
   const chatConvenienceSaving = useSettingsStore((state) => state.chatConvenienceSaving);
   const ensureChatConvenienceAuthorization = useSettingsStore((state) => state.ensureChatConvenienceAuthorization);
   const setChatConvenienceAuthorization = useSettingsStore((state) => state.setChatConvenienceAuthorization);
@@ -222,7 +223,7 @@ export function ChatView() {
       sessionId = created.id;
     }
     if (!sessionId) return false;
-    const canUseConvenience = routePreference !== "byok";
+    const canUseConvenience = routePreference !== "byok" && !(routePreference === "auto" && aiDefaultRoute?.kind === "byok");
     const taskId = await send(projectId, rootPath, sessionId, content, routePreference, {
       convenienceEnabled: Boolean(
         canUseConvenience && chatConvenienceAuthorization?.enabled && !hasPendingConvenienceEdit(activeSession),
@@ -251,7 +252,7 @@ export function ChatView() {
       const ok = window.confirm(t("chat.convenience.confirmEnable"));
       if (!ok) return;
     }
-    void setChatConvenienceAuthorization(projectId, rootPath, enabled);
+    void setChatConvenienceAuthorization(projectId, rootPath, enabled).catch(() => undefined);
   };
 
   return (

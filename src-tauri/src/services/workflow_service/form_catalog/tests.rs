@@ -99,6 +99,77 @@ fn configured_provider_is_listed_without_credentials_but_not_health_default() {
 }
 
 #[test]
+fn ai_default_byok_is_visible_for_complete_health_even_if_configuration_is_missing() {
+    let (_root, context, settings) = fixture();
+    let mut config = settings.read_settings(&context).unwrap();
+    config.ai_default_route = Some(WorkflowRouteSelection::Byok {
+        provider: LlmProviderKind::OpenAi,
+    });
+    settings.save_settings(&context, &config).unwrap();
+    let health = WorkflowService::default()
+        .form_catalog(&context, &settings, WorkflowKind::HealthCheck)
+        .unwrap();
+    assert_eq!(health.default_route, config.ai_default_route);
+    // Metadata retains the user's choice; preparation performs availability
+    // checks rather than silently changing the selected provider.
+    assert!(!health.routes.contains(&config.ai_default_route.unwrap()));
+}
+
+#[test]
+fn ai_default_route_overrides_remembered_engine_without_overwriting_history() {
+    let (_root, context, settings) = fixture();
+    let service = WorkflowService::default();
+    let identity = project_identity(&context.root).unwrap();
+    let scope = WorkflowScope::HealthCheck {
+        mode: HealthCheckMode::Complete,
+    };
+    let old_route = Some(WorkflowRoute::Agent {
+        agent: AgentKind::Codex,
+        model: None,
+        route_revision: "old".into(),
+    });
+    service
+        .preferences
+        .remember(
+            &context,
+            &identity.canonical_identity_key,
+            &identity.identity_revision,
+            &WorkflowPersistenceMode::Persistent,
+            WorkflowPreference {
+                kind: WorkflowKind::HealthCheck,
+                scope: scope.clone(),
+                route: old_route.clone(),
+                baseline_fingerprint: "a".repeat(64),
+                preparation_fingerprint: "b".repeat(64),
+                saved_at: String::new(),
+            },
+        )
+        .unwrap();
+    let mut config = settings.read_settings(&context).unwrap();
+    config.ai_default_route = Some(WorkflowRouteSelection::Byok {
+        provider: LlmProviderKind::Ollama,
+    });
+    settings.save_settings(&context, &config).unwrap();
+    let catalog = service
+        .form_catalog(&context, &settings, WorkflowKind::HealthCheck)
+        .unwrap();
+    let remembered = catalog.remembered_draft.unwrap();
+    assert_eq!(remembered.scope, scope);
+    assert_eq!(remembered.route_selection, None);
+    assert_eq!(catalog.default_route, config.ai_default_route);
+    let history = service
+        .preferences
+        .load(
+            &context,
+            &identity.canonical_identity_key,
+            &identity.identity_revision,
+            &WorkflowPersistenceMode::Persistent,
+        )
+        .unwrap();
+    assert_eq!(history[0].route, old_route);
+}
+
+#[test]
 fn catalog_restores_only_editable_scope_and_route_from_preferences() {
     let (_root, context, settings) = fixture();
     let service = WorkflowService::default();

@@ -34,6 +34,47 @@ fn decode_percent(value: &str) -> Option<String> {
     String::from_utf8(decoded).ok()
 }
 
+/// Source links are evidence, unlike ordinary navigation links. A file existing
+/// somewhere in the Wiki cannot authorize citing it on this particular page.
+pub(super) fn validate_source_links(
+    path: &str,
+    body: &str,
+    page_sources: &HashSet<String>,
+) -> Result<(), BackendError> {
+    let matches_source = |candidate: &str| {
+        super::canonical_source_ref(candidate, page_sources).is_some()
+            // Preserve the legacy virtual sources/<filename> link convention.
+            || candidate.strip_prefix("wiki/sources/").is_some_and(|name| {
+                !name.contains('/') && super::canonical_source_ref(name, page_sources).is_some()
+            })
+    };
+    for line in body
+        .lines()
+        .filter(|line| line.trim_start().starts_with("> Sources:"))
+    {
+        for raw in crate::utils::markdown_utils::wikilink_spans(line)
+            .into_iter()
+            .map(|link| link.target)
+        {
+            let target = decode_percent(&raw).ok_or_else(|| link_error(path, &raw))?;
+            let target = format!("{}.md", target.trim_end_matches(".md"));
+            if !matches_source(&target) && !matches_source(&format!("wiki/{target}")) {
+                return Err(super::source_ref_error(path, &raw));
+            }
+        }
+        for raw in LintService::candidate_resource_refs(line) {
+            let target = decode_percent(&raw).ok_or_else(|| link_error(path, &raw))?;
+            if !LintService::candidate_resource_paths(path, &target)
+                .iter()
+                .any(|candidate| matches_source(candidate))
+            {
+                return Err(super::source_ref_error(path, &raw));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn anchor_slug(value: &str) -> String {
     let mut slug = String::new();
     let mut separator = false;
@@ -500,6 +541,33 @@ mod tests {
             files: vec![CompileFile::new(path, content)],
             deletions: Vec::new(),
             summary: "test".into(),
+        }
+    }
+
+    #[test]
+    fn source_lines_only_cite_the_pages_bound_originals() {
+        let sources = HashSet::from([
+            "wiki/sources/local/Case.md".to_string(),
+            "wiki/sources/web/例子/a,b.md".into(),
+        ]);
+        let path = "wiki/concepts/topic.md";
+        for body in [
+            "> Sources: [[sources/local/Case]]",
+            "> Sources: [original](../sources/web/例子/a,b.md)",
+        ] {
+            validate_source_links(path, body, &sources).unwrap();
+        }
+        for body in [
+            "> Sources: [[sources/local/Case]] [[sources/local/case]]",
+            "> Sources: [unbound](../sources/another.md)",
+            "> Sources: [[concepts/derived]]",
+        ] {
+            assert_eq!(
+                validate_source_links(path, body, &sources)
+                    .unwrap_err()
+                    .code,
+                "COMPILE_SOURCE_REF_INVALID"
+            );
         }
     }
 
